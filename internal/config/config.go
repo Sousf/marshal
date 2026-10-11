@@ -144,6 +144,20 @@ type Homebrew struct {
 	Tap string `yaml:"tap"`
 	// Branch is the tap's branch. Empty means main.
 	Branch string `yaml:"branch"`
+	// UpgradeLocal makes the daemon upgrade a tool on its own host as soon
+	// as a release it saw merged reaches the tap, if the tool is installed
+	// there through brew. For a daemon on the operator's workstation.
+	UpgradeLocal bool `yaml:"upgrade_local"`
+	// Brew is the brew executable. Empty means Linuxbrew's.
+	Brew string `yaml:"brew"`
+}
+
+// BrewPath resolves the brew executable.
+func (h Homebrew) BrewPath() string {
+	if h.Brew != "" {
+		return h.Brew
+	}
+	return "/home/linuxbrew/.linuxbrew/bin/brew"
 }
 
 // TapParts splits the tap into owner, repository and branch.

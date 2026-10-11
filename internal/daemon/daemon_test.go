@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -38,6 +39,19 @@ type fakeGH struct {
 	depCalls int
 	approved []string
 	closed   []string
+	// files is what FileText returns, by path.
+	files     map[string]string
+	fileCalls int
+}
+
+func (g *fakeGH) FileText(_ context.Context, _, path string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.fileCalls++
+	if t, ok := g.files[path]; ok {
+		return t, nil
+	}
+	return "", fmt.Errorf("HTTP 404")
 }
 
 func (g *fakeGH) DependabotPRs(context.Context, string) ([]github.PR, error) {
@@ -1057,5 +1071,117 @@ func TestDependabotRedCIAndUnsureIsClosed(t *testing.T) {
 	settle(t, d2)
 	if len(gh2.closed) != 0 || len(gh2.approved) != 0 {
 		t.Errorf("green and unsure: closed=%v approved=%v", gh2.closed, gh2.approved)
+	}
+}
+
+// fakeBrew writes a brew stand-in that records its arguments and lists the
+// given formulas as installed.
+func fakeBrew(t *testing.T, installed ...string) (path, log string) {
+	t.Helper()
+	dir := t.TempDir()
+	log = filepath.Join(dir, "calls")
+	path = filepath.Join(dir, "brew")
+	script := "#!/bin/sh\necho \"$@\" >> " + log + "\n[ \"$1\" = list ] && printf '%s\\n' " + strings.Join(installed, " ") + "\nexit 0\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(dir, "marshal"), []byte("#!/bin/sh\n"), 0o755)
+	return path, log
+}
+
+func TestMergedReleaseIsUpgradedOnceItReachesTheTap(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"rel": {State: "MERGED"}}, files: map[string]string{}}
+	d, _ := newDaemon(t, gh)
+	brew, calls := fakeBrew(t, "sousf/tap/x", "sousf/tap/marshal")
+	d.Fleet.Homebrew = config.Homebrew{Tap: "Sousf/homebrew-tap", UpgradeLocal: true, Brew: brew}
+	r := &store.Run{Job: "release", Repo: "x", Class: "release", Status: store.Proposed, StartedAt: time.Now()}
+	d.Store.CreateRun(ctx, r)
+	r.PRURL, r.Summary = "rel", "Release v1.2.3\n\nnotes"
+	d.Store.UpdateRun(ctx, r)
+	if err := d.syncProposals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	d.upgradeReleased(ctx) // not in the tap yet
+	waitUpgrade(t, d)
+	if b, _ := os.ReadFile(calls); len(b) != 0 {
+		t.Fatalf("brew ran before the release reached the tap: %s", b)
+	}
+	gh.files["Formula/x.rb"] = "class X < Formula\n  version \"1.2.3\"\nend\n"
+	d.upgradeReleased(ctx)
+	waitUpgrade(t, d)
+	b, _ := os.ReadFile(calls)
+	if !strings.Contains(string(b), "upgrade --formula sousf/tap/x") {
+		t.Errorf("brew calls:\n%s", b)
+	}
+	// Done: nothing is awaited, so no more calls.
+	n := gh.fileCalls
+	d.upgradeReleased(ctx)
+	if gh.fileCalls != n {
+		t.Error("the tap is still being polled after the upgrade")
+	}
+	if d.restartTo != "" {
+		t.Error("only a marshal upgrade restarts the daemon")
+	}
+}
+
+func TestMarshalUpgradeRestartsWhenIdle(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{}, files: map[string]string{"Formula/marshal.rb": "  version \"0.2.0\"\n"}}
+	d, _ := newDaemon(t, gh)
+	brew, _ := fakeBrew(t, "sousf/tap/marshal")
+	d.Fleet.Homebrew = config.Homebrew{Tap: "Sousf/homebrew-tap", UpgradeLocal: true, Brew: brew}
+	d.Fleet.Repos = append(d.Fleet.Repos, config.Repo{Name: "marshal", URL: "u"})
+	var restarted string
+	d.Restart = func(p string) { restarted = p }
+	d.Store.SetSetting(ctx, awaitPrefix+"marshal", "0.2.0@"+strconv.FormatInt(time.Now().Unix(), 10))
+	d.upgradeReleased(ctx)
+	waitUpgrade(t, d)
+	d.mu.Lock()
+	d.running["x"] = "busy"
+	d.mu.Unlock()
+	d.maybeRestart()
+	if restarted != "" {
+		t.Fatal("restarted with a run in flight")
+	}
+	d.mu.Lock()
+	delete(d.running, "x")
+	d.mu.Unlock()
+	d.maybeRestart()
+	if restarted != filepath.Join(filepath.Dir(brew), "marshal") {
+		t.Errorf("restarted into %q", restarted)
+	}
+}
+
+func TestAwaitedReleaseGivesUp(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{}, files: map[string]string{}}
+	d, _ := newDaemon(t, gh)
+	c := withNotify(t, d)
+	d.Fleet.Homebrew = config.Homebrew{Tap: "Sousf/homebrew-tap", UpgradeLocal: true}
+	d.Store.SetSetting(ctx, awaitPrefix+"x", "1.0.0@"+strconv.FormatInt(time.Now().Add(-3*time.Hour).Unix(), 10))
+	d.upgradeReleased(ctx)
+	if got := strings.Join(c.kinds(), ","); got != "failed" {
+		t.Errorf("notifications = %s", got)
+	}
+	if v, _ := d.Store.Setting(ctx, awaitPrefix+"x", ""); v != "" {
+		t.Error("a stale await was kept")
+	}
+}
+
+func waitUpgrade(t *testing.T, d *Daemon) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		d.mu.Lock()
+		busy := d.upgrading
+		d.mu.Unlock()
+		if !busy {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("upgrade did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

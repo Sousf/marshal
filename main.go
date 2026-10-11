@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -638,12 +639,40 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	if !d.Adapter.Available() {
 		logger.Printf("warning: %s is not on PATH; scheduled runs will fail until it is", "claude")
 	}
+	// A restart into a newly installed MARSHAL stops this daemon the normal
+	// way, then replaces the process image: same pid, so the pid file and
+	// marshal stop keep working, and the new one clears the socket.
+	ctx, stopForRestart := context.WithCancel(ctx)
+	defer stopForRestart()
+	var restartMu sync.Mutex
+	restartTo := ""
+	d.Restart = func(path string) {
+		if fi, err := os.Stat(path); err != nil || fi.Mode()&0o111 == 0 {
+			logger.Printf("restart: %s is not an executable; staying on %s", path, version)
+			return
+		}
+		restartMu.Lock()
+		if restartTo == "" {
+			restartTo = path
+			stopForRestart()
+		}
+		restartMu.Unlock()
+	}
 	errc := make(chan error, 1)
 	go func() { errc <- api.Serve(ctx, socketPath(), d) }()
 	logger.Printf("listening on %s", socketPath())
 	runErr := d.Run(ctx)
-	if err := <-errc; err != nil && runErr == nil {
-		return err
+	serveErr := <-errc
+	restartMu.Lock()
+	to := restartTo
+	restartMu.Unlock()
+	if to != "" {
+		st.Close()
+		logger.Printf("exec %s", to)
+		return syscall.Exec(to, append([]string{to}, os.Args[1:]...), os.Environ())
+	}
+	if serveErr != nil && runErr == nil {
+		return serveErr
 	}
 	return runErr
 }

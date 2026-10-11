@@ -190,6 +190,15 @@ Working today:
   makes every `git push` in that clone run it first; `git push
   --no-verify` skips it once. MARSHAL's own pre-flight runs the same way.
 
+- Upgrades on your own machine. With `homebrew.upgrade_local: true`, a
+  daemon running where the tools are installed upgrades each one as soon
+  as its release lands. When it sees a release PR merge, it checks the tap
+  once a minute for that version, and nothing more once it arrives. Then
+  it runs `brew upgrade` for that formula if it's installed there. If the
+  tool is MARSHAL, the daemon restarts into the new binary once nothing is
+  running, keeping its pid. If a release takes more than two hours to
+  reach the tap, you're notified and it stops checking.
+
 [SECURITY.md](SECURITY.md) is the trust model: what is a boundary, what is
 only a heuristic, and the gaps that remain until runs are isolated.
 
