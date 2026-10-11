@@ -69,6 +69,45 @@ func Prepare(ctx context.Context, root string, repo config.Repo, job, runID stri
 	return w, nil
 }
 
+// PrepareExisting clones repo and checks out an existing proposal branch so
+// a follow-up can commit and push to it. The branch tracks origin, so Push
+// updates the open pull request.
+func PrepareExisting(ctx context.Context, root string, repo config.Repo, runID, branch string, id config.Identity, env []string) (*Workspace, error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp(root, "run-"+runID+"-")
+	if err != nil {
+		return nil, err
+	}
+	w := &Workspace{Dir: dir, Repo: repo, Identity: id, Env: env, Branch: branch}
+	args := []string{"clone", "--quiet"}
+	if repo.Branch != "" {
+		args = append(args, "--branch", repo.Branch)
+	}
+	if _, err := w.gitIn(ctx, root, append(args, repo.URL, dir)...); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("clone %s: %w", repo.URL, err)
+	}
+	if w.Repo.Branch == "" {
+		head, err := w.git(ctx, "symbolic-ref", "--short", "HEAD")
+		if err != nil {
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("%s: cannot determine default branch: %w", repo.URL, err)
+		}
+		w.Repo.Branch = strings.TrimSpace(head)
+	}
+	if _, err := w.git(ctx, "fetch", "--quiet", "origin", branch+":"+branch); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("fetch %s: %w", branch, err)
+	}
+	if _, err := w.git(ctx, "checkout", "--quiet", branch); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	return w, nil
+}
+
 // PrepareHead clones repo and checks out a proposal's head commit, for the
 // verifier. The base branch is fetched too so the diff can be taken against
 // the exact point the proposal branched from. Nothing here is ever pushed.

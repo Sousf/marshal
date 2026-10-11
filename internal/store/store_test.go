@@ -119,6 +119,22 @@ func TestStatusQueriesAndSettings(t *testing.T) {
 	}
 }
 
+func TestFollowups(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	p := &Run{Job: "j", Repo: "r", Status: Proposed}
+	s.CreateRun(ctx, p)
+	f := &Run{Job: "fix-checks", Repo: "r", Status: Pushed, Parent: p.ID, BaseHead: "abc"}
+	s.CreateRun(ctx, f)
+	got, err := s.Followups(ctx, p.ID)
+	if err != nil || len(got) != 1 || got[0].BaseHead != "abc" || got[0].Parent != p.ID {
+		t.Errorf("%+v %v", got, err)
+	}
+	if none, _ := s.Followups(ctx, "zzz"); len(none) != 0 {
+		t.Error("unknown parent has no followups")
+	}
+}
+
 func TestVerdicts(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()

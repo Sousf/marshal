@@ -33,6 +33,7 @@ type GitHub interface {
 	AddLabel(ctx context.Context, url, label string) error
 	LatestCI(ctx context.Context, slug, branch string) (github.CI, bool, error)
 	DefaultBranch(ctx context.Context, slug string) (string, error)
+	FailedLogs(ctx context.Context, slug, sha string, limit int) (string, error)
 }
 
 // Daemon holds the loop's state.
@@ -193,6 +194,12 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			d.note(ctx, r.ID, "closed without merging")
 			d.move(ctx, ladder, repo, r.Class, policy.Rejected)
 		default:
+			// Red checks on MARSHAL's own PR are MARSHAL's to fix, within a
+			// cap. Nothing else happens to the PR while it is red.
+			if pr.Checks == "FAILURE" {
+				d.fixChecks(ctx, repo, r, pr)
+				continue
+			}
 			by, reason := "", ""
 			if autonomy {
 				by, reason = d.mayMerge(ctx, ladder, repo, r, pr)
@@ -287,6 +294,85 @@ func (d *Daemon) mayMerge(ctx context.Context, ladder policy.Ladder, repo config
 		return "soak", ""
 	}
 	return "auto", ""
+}
+
+// fixChecks starts a follow-up run that pushes a fix to a red proposal.
+// Each failing head is attempted once; past the cap the PR is labelled for
+// a human and left alone.
+func (d *Daemon) fixChecks(ctx context.Context, repo config.Repo, r store.Run, pr github.PR) {
+	cap := d.Fleet.Policy.Caps.FixAttempts()
+	if cap == 0 {
+		return
+	}
+	prior, err := d.Store.Followups(ctx, r.ID)
+	if err != nil {
+		d.fail("run %s: followups: %v", r.ID, err)
+		return
+	}
+	attempts := 0
+	for _, f := range prior {
+		if f.Status == store.Running {
+			return // one at a time
+		}
+		if f.BaseHead == pr.HeadSHA && pr.HeadSHA != "" {
+			return // this head was already attempted; wait for a new push or a human
+		}
+		if f.Status == store.Pushed || f.Status == store.NoChange || f.Status == store.Failed || f.Status == store.Blocked {
+			attempts++
+		}
+	}
+	if attempts >= cap {
+		if !pr.HasLabel("marshal:needs-human") {
+			d.note(ctx, r.ID, "checks still failing after %d fix attempt(s); handing to a human", attempts)
+			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("MARSHAL tried %d time(s) to make the checks pass on this pull request and stopped at the cap. It needs a human.", attempts))
+			_ = d.GH.AddLabel(ctx, r.PRURL, "marshal:needs-human")
+		}
+		return
+	}
+	if d.busy(repo.Name) {
+		return
+	}
+	slug := repo.GitHub
+	if slug == "" {
+		slug, _ = github.Slug(repo.URL)
+	}
+	logs := ""
+	if slug != "" {
+		l, err := d.GH.FailedLogs(ctx, slug, pr.HeadSHA, 48*1024)
+		if err != nil {
+			d.fail("run %s: failed logs: %v", r.ID, err)
+		}
+		logs = l
+	}
+	d.mu.Lock()
+	id := store.NewID()
+	d.running[repo.Name] = id
+	d.mu.Unlock()
+	d.note(ctx, r.ID, "checks failed on head %s; starting fix run %s (attempt %d of %d)", short(pr.HeadSHA), id, attempts+1, cap)
+	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			delete(d.running, repo.Name)
+			d.mu.Unlock()
+		}()
+		rec, err := x.Followup(d.base, r, pr, logs, run.Options{ID: id})
+		if err != nil {
+			d.fail("run %s: %v", id, err)
+			return
+		}
+		d.Log.Printf("run %s: %s (fix for %s)", id, rec.Status, r.ID)
+		switch rec.Status {
+		case store.Pushed:
+			_ = d.GH.CommentPR(d.base, r.PRURL, "MARSHAL pushed a fix for the failing checks (run `"+id+"`).\n\n"+rec.Summary)
+		case store.NoChange, store.Failed, store.Blocked:
+			msg := rec.Summary
+			if rec.Error != "" {
+				msg = rec.Error
+			}
+			_ = d.GH.CommentPR(d.base, r.PRURL, fmt.Sprintf("MARSHAL could not fix the failing checks (run `%s`, %s).\n\n%s", id, rec.Status, msg))
+		}
+	}()
 }
 
 // startVerify runs the verifier for a proposal in the background, once per

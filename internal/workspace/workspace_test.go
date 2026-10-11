@@ -122,6 +122,45 @@ func TestPrepareHead(t *testing.T) {
 	}
 }
 
+func TestPrepareExistingAndPush(t *testing.T) {
+	ctx := context.Background()
+	src := origin(t)
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = src
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("checkout", "-q", "-b", "marshal/j/abc")
+	os.WriteFile(filepath.Join(src, "new.txt"), []byte("1\n"), 0o644)
+	run("add", ".")
+	run("commit", "-q", "-m", "proposal")
+	run("checkout", "-q", "main")
+
+	w, err := PrepareExisting(ctx, t.TempDir(), config.Repo{Name: "x", URL: src}, "r2", "marshal/j/abc", config.Identity{Name: "M", Email: "m@m.invalid"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove()
+	if b, _ := os.ReadFile(filepath.Join(w.Dir, "new.txt")); string(b) != "1\n" {
+		t.Fatal("proposal branch not checked out")
+	}
+	os.WriteFile(filepath.Join(w.Dir, "new.txt"), []byte("2\n"), 0o644)
+	if err := w.Commit(ctx, "fix"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Push(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := run("log", "-1", "--format=%s", "marshal/j/abc"); got != "fix" {
+		t.Errorf("origin branch head = %q, want the pushed fix", got)
+	}
+}
+
 func TestPrepareBadURL(t *testing.T) {
 	_, err := Prepare(context.Background(), t.TempDir(), config.Repo{Name: "x", URL: filepath.Join(t.TempDir(), "nope"), Branch: "main"}, "j", "r", config.Identity{}, nil)
 	if err == nil {

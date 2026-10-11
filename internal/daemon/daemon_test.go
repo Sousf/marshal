@@ -52,17 +52,28 @@ func (g *fakeGH) AddLabel(_ context.Context, url, label string) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.labels = append(g.labels, url+": "+label)
+	// Mirror GitHub: the label shows on the next view.
+	p := g.prs[url]
+	p.Labels = append(p.Labels, label)
+	g.prs[url] = p
 	return nil
 }
 func (g *fakeGH) LatestCI(context.Context, string, string) (github.CI, bool, error) {
 	return g.ci, true, nil
 }
 func (g *fakeGH) DefaultBranch(context.Context, string) (string, error) { return "main", nil }
+func (g *fakeGH) FailedLogs(context.Context, string, string, int) (string, error) {
+	return "## ci (run 1): failure\n\n```\nFAIL: TestX\n```\n", nil
+}
 
 type fakeAdapter struct {
 	mu      sync.Mutex
 	calls   int
 	verdict string // what the verifier run answers; empty means no structured answer
+	// fix, when set, is applied to the work tree of a fix-checks run so
+	// there is something to push.
+	fix     func(dir string)
+	prompts []string
 }
 
 func (*fakeAdapter) Name() string    { return "fake" }
@@ -78,6 +89,11 @@ func (f *fakeAdapter) Run(_ context.Context, req runner.Request, emit func(runne
 		return r, nil
 	}
 	f.calls++
+	f.prompts = append(f.prompts, req.Prompt)
+	if f.fix != nil && strings.Contains(req.Prompt, "Fix failing checks") {
+		f.fix(req.Dir)
+		return runner.Result{Output: "Fix the test\n\nCorrected the assertion.", Turns: 2, CostUSD: 0.02}, nil
+	}
 	return runner.Result{Output: "NO CHANGE: fine", Turns: 1, CostUSD: 0.01}, nil
 }
 
@@ -374,6 +390,81 @@ func TestVerifierBlocksAutoMerge(t *testing.T) {
 	v2, _, _ := d2.Store.LatestVerdict(ctx, r2.ID)
 	if len(gh2.merged) != 0 || v2.Verdict != "UNSURE" {
 		t.Errorf("merged=%v verdict=%+v", gh2.merged, v2)
+	}
+}
+
+func TestRedChecksGetFixedWithinCap(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "FAILURE", Title: "Pin things", Body: "body"}}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.fix = func(wd string) { os.WriteFile(filepath.Join(wd, "fixed.txt"), []byte("ok\n"), 0o644) }
+	r := proposalIn(t, d, gh, dir, "hardening", "u", time.Now())
+	head1 := gh.prs["u"].HeadSHA
+
+	settle(t, d)
+	wait(t, d)
+	fu, _ := d.Store.Followups(ctx, r.ID)
+	if len(fu) != 1 || fu[0].Status != store.Pushed || fu[0].BaseHead != head1 || fu[0].Job != "fix-checks" || fu[0].PRURL != "u" {
+		t.Fatalf("followups = %+v", fu)
+	}
+	if !strings.Contains(strings.Join(a.prompts, "\n"), "FAIL: TestX") || !strings.Contains(strings.Join(a.prompts, "\n"), "<pr-body>") {
+		t.Error("fix brief should carry the failing log and the PR claim")
+	}
+	// The branch on the origin moved.
+	cmd := exec.Command("git", "log", "-1", "--format=%s", r.Branch)
+	cmd.Dir = dir
+	out, _ := cmd.Output()
+	if strings.TrimSpace(string(out)) != "Fix the test" {
+		t.Errorf("origin branch head = %q", out)
+	}
+	if n := len(gh.comments); n != 1 || !strings.Contains(gh.comments[0], "pushed a fix") {
+		t.Errorf("comments = %v", gh.comments)
+	}
+	// Same head still red: no second attempt on the same head.
+	settle(t, d)
+	wait(t, d)
+	if fu, _ := d.Store.Followups(ctx, r.ID); len(fu) != 1 {
+		t.Error("the same failing head must not be attempted twice")
+	}
+	// New head, still red: second attempt, then the cap.
+	p := gh.prs["u"]
+	p.HeadSHA = "newhead2"
+	gh.prs["u"] = p
+	settle(t, d)
+	wait(t, d)
+	if fu, _ := d.Store.Followups(ctx, r.ID); len(fu) != 2 {
+		t.Fatalf("second head should get a second attempt: %d", len(fu))
+	}
+	p.HeadSHA = "newhead3"
+	gh.prs["u"] = p
+	settle(t, d)
+	wait(t, d)
+	fu, _ = d.Store.Followups(ctx, r.ID)
+	if len(fu) != 2 {
+		t.Errorf("cap of 2 exceeded: %d attempts", len(fu))
+	}
+	if len(gh.labels) != 1 || !strings.Contains(gh.labels[0], "needs-human") {
+		t.Errorf("at the cap the PR is handed to a human: labels=%v", gh.labels)
+	}
+	// Nothing merged, nothing verified while red.
+	if len(gh.merged) != 0 {
+		t.Error("a red PR never merges")
+	}
+	if v, ok, _ := d.Store.LatestVerdict(ctx, r.ID); ok {
+		t.Errorf("no verification while red: %+v", v)
+	}
+}
+
+func TestFixAttemptsCanBeDisabled(t *testing.T) {
+	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "FAILURE"}}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.fix = func(wd string) { os.WriteFile(filepath.Join(wd, "f.txt"), []byte("x"), 0o644) }
+	d.Fleet.Policy.Caps.CheckFixAttempts = -1
+	r := proposalIn(t, d, gh, dir, "hardening", "u", time.Now())
+	settle(t, d)
+	wait(t, d)
+	if fu, _ := d.Store.Followups(context.Background(), r.ID); len(fu) != 0 {
+		t.Error("-1 disables follow-ups")
 	}
 }
 

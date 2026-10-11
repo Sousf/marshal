@@ -13,6 +13,7 @@ import (
 
 	"github.com/Sousf/marshal/internal/config"
 	"github.com/Sousf/marshal/internal/ghapp"
+	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
 	"github.com/Sousf/marshal/internal/policy"
 	"github.com/Sousf/marshal/internal/runner"
@@ -200,6 +201,149 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	rec.PRURL = url
 	logf("note", "opened %s", url)
 	return finish(store.Proposed, "")
+}
+
+// Followup pushes a fix to one of MARSHAL's own open proposals whose checks
+// failed. It is a run like any other, on the proposal's branch instead of a
+// new one, with the failing logs in the brief and a PR comment instead of a
+// new PR. The parent's job sets the path rules the fix must stay inside.
+func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR, logs string, opts Options) (store.Run, error) {
+	job, ok := x.Fleet.Job(parent.Job)
+	if !ok {
+		return store.Run{}, fmt.Errorf("unknown job %q", parent.Job)
+	}
+	repo, ok := x.Fleet.Repo(parent.Repo)
+	if !ok {
+		return store.Run{}, fmt.Errorf("unknown repo %q", parent.Repo)
+	}
+	res := x.Fleet.Resolve(job)
+	brief, _ := jobs.Prompt("fix-checks")
+	if !x.Adapter.Available() {
+		return store.Run{}, fmt.Errorf("adapter %s is not available on this host", x.Adapter.Name())
+	}
+	branch := pr.HeadRef
+	if branch == "" {
+		branch = parent.Branch
+	}
+	rec := &store.Run{ID: opts.ID, Job: "fix-checks", Repo: repo.Name, Class: job.Class, Adapter: x.Adapter.Name(), Model: res.Model,
+		Branch: branch, Parent: parent.ID, BaseHead: pr.HeadSHA}
+	if err := x.Store.CreateRun(ctx, rec); err != nil {
+		return store.Run{}, err
+	}
+	rec.PRURL = parent.PRURL
+	logf := x.logger(ctx, rec.ID, opts.Log)
+	finish := func(st store.Status, errText string) (store.Run, error) {
+		rec.Status = st
+		rec.Error = errText
+		rec.FinishedAt = time.Now()
+		if err := x.Store.UpdateRun(ctx, rec); err != nil {
+			return *rec, err
+		}
+		return *rec, nil
+	}
+	logf("note", "run %s: fixing checks on %s (parent %s, head %s)", rec.ID, parent.PRURL, parent.ID, short(pr.HeadSHA))
+
+	harnessEnv, agentEnv := opts.Env, opts.Env
+	identity := res.Identity
+	if x.Auth != nil {
+		full, err := x.Auth.Env(ctx, ghapp.Full)
+		if err != nil {
+			return finish(store.Failed, err.Error())
+		}
+		ro, err := x.Auth.Env(ctx, ghapp.ReadOnly)
+		if err != nil {
+			return finish(store.Failed, err.Error())
+		}
+		harnessEnv = append(append([]string{}, opts.Env...), full...)
+		agentEnv = append(append([]string{}, opts.Env...), ro...)
+		repo.URL = ghapp.CloneURL(repo)
+		identity = x.Auth.Identity()
+	}
+	ws, err := workspace.PrepareExisting(ctx, x.workRoot(), repo, rec.ID, branch, identity, harnessEnv)
+	if err != nil {
+		return finish(store.Failed, err.Error())
+	}
+	if !opts.Keep {
+		defer ws.Remove()
+	}
+
+	var b strings.Builder
+	b.WriteString(brief)
+	fmt.Fprintf(&b, "\n## The pull request\n\n%s\n\nOriginal job `%s`: %s\n\nTitle: %s\n\n<pr-body>\n%s\n</pr-body>\n", parent.PRURL, job.Name, job.Description, pr.Title, strings.TrimSpace(pr.Body))
+	if strings.TrimSpace(logs) == "" {
+		b.WriteString("\n## Failing checks\n\nNo failed-step log was available; use `gh run list` and `gh run view --log-failed` to find it.\n")
+	} else {
+		b.WriteString("\n## Failing checks\n\n" + logs + "\n")
+	}
+	b.WriteString(jobs.Contract)
+
+	req := runner.Request{
+		Prompt:          b.String(),
+		SystemPrompt:    systemPrompt(repo, ws.Conventions()),
+		Dir:             ws.Dir,
+		Model:           res.Model,
+		Effort:          res.Effort,
+		MaxTurns:        res.MaxTurns,
+		MaxUSD:          res.MaxUSD,
+		PermissionMode:  res.PermissionMode,
+		AllowedTools:    res.AllowedTools,
+		DisallowedTools: res.DisallowedTools,
+		Env:             agentEnv,
+	}
+	result, runErr := x.Adapter.Run(ctx, req, func(e runner.Event) { logf(string(e.Kind), "%s", e.Text) })
+	rec.Turns = result.Turns
+	rec.CostUSD = result.CostUSD
+	rec.Summary = result.Output
+	if ctx.Err() != nil {
+		return finish(store.Cancelled, ctx.Err().Error())
+	}
+	if runErr != nil {
+		return finish(store.Failed, runErr.Error())
+	}
+	if result.IsError {
+		return finish(store.Failed, "agent: "+firstLine(result.Output))
+	}
+	changed, err := ws.Changed(ctx)
+	if err != nil {
+		return finish(store.Failed, err.Error())
+	}
+	if !changed {
+		logf("note", "no changes")
+		return finish(store.NoChange, "")
+	}
+	numstat, err := ws.Numstat(ctx)
+	if err != nil {
+		return finish(store.Failed, err.Error())
+	}
+	changes := policy.ParseNumstat(numstat)
+	if v := policy.Check(job, changes); len(v) > 0 {
+		var vb strings.Builder
+		for _, x := range v {
+			vb.WriteString(x.String() + "\n")
+			logf("blocked", "%s", x.String())
+		}
+		return finish(store.Blocked, strings.TrimSpace(vb.String()))
+	}
+	title, body := splitReport(result.Output, "fix-checks")
+	if err := ws.Commit(ctx, title+"\n\n"+body+trailer(rec, result)); err != nil {
+		return finish(store.Failed, err.Error())
+	}
+	if opts.NoPR {
+		logf("note", "committed on %s (not pushed)", ws.Branch)
+		return finish(store.Committed, "")
+	}
+	if err := ws.Push(ctx); err != nil {
+		return finish(store.Failed, err.Error())
+	}
+	logf("note", "pushed fix to %s", ws.Branch)
+	return finish(store.Pushed, "")
+}
+
+func short(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
 }
 
 func (x *Executor) workRoot() string {

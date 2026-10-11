@@ -204,6 +204,21 @@ type Caps struct {
 	AutoMergesPerRepoPerDay int     `yaml:"auto_merges_per_repo_per_day"`
 	USDPerDay               float64 `yaml:"usd_per_day"`
 	PRsPerRepoPerDay        int     `yaml:"prs_per_repo_per_day"`
+	// CheckFixAttempts is how many times MARSHAL may push a fix to one of
+	// its own PRs whose checks failed. Zero means the default of 2; -1
+	// disables follow-ups.
+	CheckFixAttempts int `yaml:"check_fix_attempts"`
+}
+
+// FixAttempts resolves the follow-up cap.
+func (c Caps) FixAttempts() int {
+	switch {
+	case c.CheckFixAttempts < 0:
+		return 0
+	case c.CheckFixAttempts == 0:
+		return 2
+	}
+	return c.CheckFixAttempts
 }
 
 // SetGitHubApp writes the github_app block into the fleet file at path,

@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -197,6 +198,49 @@ func (c Client) LatestCI(ctx context.Context, slug, branch string) (CI, bool, er
 	}
 	r := runs[0]
 	return CI{Status: r.Status, Conclusion: r.Conclusion, URL: r.URL, UpdatedAt: r.UpdatedAt}, true, nil
+}
+
+// FailedLogs returns the failed-step logs of the workflow runs for a commit,
+// bounded to limit bytes per run, as context for a fix. Empty when nothing
+// failed or the runs are still going.
+func (c Client) FailedLogs(ctx context.Context, slug, sha string, limit int) (string, error) {
+	out, err := c.gh(ctx, "run", "list", "--repo", slug, "--commit", sha, "--limit", "10",
+		"--json", "databaseId,status,conclusion,workflowName,name")
+	if err != nil {
+		return "", err
+	}
+	var runs []struct {
+		ID           int64  `json:"databaseId"`
+		Status       string `json:"status"`
+		Conclusion   string `json:"conclusion"`
+		WorkflowName string `json:"workflowName"`
+		Name         string `json:"name"`
+	}
+	if err := json.Unmarshal(out, &runs); err != nil {
+		return "", fmt.Errorf("gh run list: %w", err)
+	}
+	if limit <= 0 {
+		limit = 64 * 1024
+	}
+	var b strings.Builder
+	for _, r := range runs {
+		if r.Status != "completed" || (CI{Status: r.Status, Conclusion: r.Conclusion}).Red() == false {
+			continue
+		}
+		log, err := c.gh(ctx, "run", "view", strconv.FormatInt(r.ID, 10), "--repo", slug, "--log-failed")
+		if err != nil {
+			// A run with no failed steps (cancelled, startup failure) has
+			// no failed log; say so rather than fail the whole fetch.
+			fmt.Fprintf(&b, "## %s (run %d): %s, no step log available\n\n", r.WorkflowName, r.ID, r.Conclusion)
+			continue
+		}
+		text := string(log)
+		if len(text) > limit {
+			text = "[... earlier output trimmed ...]\n" + text[len(text)-limit:]
+		}
+		fmt.Fprintf(&b, "## %s (run %d): %s\n\n```\n%s\n```\n\n", r.WorkflowName, r.ID, r.Conclusion, strings.TrimSpace(text))
+	}
+	return b.String(), nil
 }
 
 // DefaultBranch asks the remote for its default branch.

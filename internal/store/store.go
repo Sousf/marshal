@@ -28,6 +28,7 @@ const (
 	Running   Status = "running"
 	NoChange  Status = "no-change" // agent finished, nothing to propose
 	Committed Status = "committed" // committed on a local branch, no PR asked for
+	Pushed    Status = "pushed"    // follow-up pushed to an existing PR
 	Proposed  Status = "proposed"  // PR opened, awaiting review or soak
 	Merged    Status = "merged"
 	Rejected  Status = "rejected" // operator closed the PR
@@ -54,6 +55,11 @@ type Run struct {
 	// MergedBy records who merged a Proposed run: "human", "auto" or "soak".
 	// Only human merges count as approvals on the trust ladder.
 	MergedBy string
+	// Parent is the run this one followed up, for a fix pushed to an
+	// existing PR. BaseHead is the PR head the follow-up started from, so
+	// the same failing head is never attempted twice.
+	Parent   string
+	BaseHead string
 	// Summary is the agent's final report; the PR body.
 	Summary string
 	// Error explains Failed or Blocked.
@@ -185,6 +191,8 @@ func (s *Store) migrate() error {
 	// EXISTS, so the error for an existing column is the expected outcome.
 	for _, stmt := range []string{
 		`ALTER TABLE runs ADD COLUMN merged_by TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN parent TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN base_head TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -215,9 +223,9 @@ func (s *Store) CreateRun(ctx context.Context, r *Run) error {
 		r.Status = Running
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO runs
-		(id, job, repo, class, adapter, model, status, started_at, branch)
-		VALUES (?,?,?,?,?,?,?,?,?)`,
-		r.ID, r.Job, r.Repo, r.Class, r.Adapter, r.Model, r.Status, r.StartedAt.Unix(), r.Branch)
+		(id, job, repo, class, adapter, model, status, started_at, branch, parent, base_head)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+		r.ID, r.Job, r.Repo, r.Class, r.Adapter, r.Model, r.Status, r.StartedAt.Unix(), r.Branch, r.Parent, r.BaseHead)
 	return err
 }
 
@@ -253,14 +261,14 @@ func (s *Store) AppendEvent(ctx context.Context, runID string, e Event) error {
 var ErrNotFound = errors.New("not found")
 
 const runCols = `id, job, repo, class, adapter, model, status, started_at, finished_at,
-	turns, cost_usd, branch, pr_url, summary, error, merged_by`
+	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head`
 
 func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var r Run
 	var started int64
 	var finished sql.NullInt64
 	err := sc.Scan(&r.ID, &r.Job, &r.Repo, &r.Class, &r.Adapter, &r.Model, &r.Status,
-		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy)
+		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead)
 	if err != nil {
 		return r, err
 	}
@@ -341,6 +349,24 @@ func (s *Store) ListByStatus(ctx context.Context, statuses ...Status) ([]Run, er
 	}
 	q += `) ORDER BY started_at`
 	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Followups returns the follow-up runs of a parent, oldest first.
+func (s *Store) Followups(ctx context.Context, parent string) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+runCols+` FROM runs WHERE parent=? ORDER BY started_at, rowid`, parent)
 	if err != nil {
 		return nil, err
 	}

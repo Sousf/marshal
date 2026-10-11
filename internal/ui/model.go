@@ -292,7 +292,11 @@ func (m *Model) fillLists() {
 		}
 		m.visible = append(m.visible, r)
 		st := statusCell(r.Status, m.spin.View())
-		rows = append(rows, []string{r.ID, sDim.Render(ago(r.StartedAt)), r.Repo, r.Job, st,
+		job := r.Job
+		if r.Parent != "" {
+			job = sDim.Render("↳ ") + job
+		}
+		rows = append(rows, []string{r.ID, sDim.Render(ago(r.StartedAt)), r.Repo, job, st,
 			fmt.Sprint(r.Turns), fmt.Sprintf("%.2f", r.CostUSD), sDim.Render(shortPR(r.PRURL))})
 	}
 	m.runList.setRows(rows)
@@ -326,6 +330,8 @@ func statusCell(s store.Status, spin string) string {
 		return sWarn.Render("◆ proposed")
 	case store.Committed:
 		return sGood.Render("● committed")
+	case store.Pushed:
+		return sGood.Render("● pushed")
 	case store.NoChange:
 		return sDim.Render("○ no change")
 	case store.Failed:
