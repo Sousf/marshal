@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -107,6 +108,8 @@ type fakeAdapter struct {
 	// there is something to push.
 	fix     func(dir string)
 	prompts []string
+	// fail, when set, is what every non-verifier run returns.
+	fail error
 }
 
 func (*fakeAdapter) Name() string    { return "fake" }
@@ -123,6 +126,9 @@ func (f *fakeAdapter) Run(_ context.Context, req runner.Request, emit func(runne
 	}
 	f.calls++
 	f.prompts = append(f.prompts, req.Prompt)
+	if f.fail != nil {
+		return runner.Result{IsError: true}, f.fail
+	}
 	if f.fix != nil && (strings.Contains(req.Prompt, "Fix failing checks") || strings.Contains(req.Prompt, "Address review feedback")) {
 		f.fix(req.Dir)
 		return runner.Result{Output: "Fix the test\n\nCorrected the assertion.", Turns: 2, CostUSD: 0.02}, nil
@@ -778,4 +784,93 @@ func wait(t *testing.T, d *Daemon) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func TestNeverFloorHoldsMerge(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"pr": {State: "OPEN", Checks: "SUCCESS", Review: "APPROVED"}}}
+	d, _, dir := newDaemonDir(t, gh)
+	d.Store.PutTrust(ctx, store.Trust{Repo: "x", Class: "hardening", Level: "auto"})
+	d.Fleet.Never.AutoMerge = []string{"x/*"}
+	proposalIn(t, d, gh, dir, "hardening", "pr", time.Now())
+	settle(t, d)
+	if len(gh.merged) != 0 {
+		t.Error("never.auto_merge must beat an auto level and green checks")
+	}
+}
+
+func TestRepeatFailuresNotifyOnce(t *testing.T) {
+	ctx := context.Background()
+	d, a := newDaemon(t, &fakeGH{prs: map[string]github.PR{}})
+	c := withNotify(t, d)
+	for i := 0; i < 3; i++ {
+		a.fail = fmt.Errorf("clone failed in /tmp/marshal-%d after %ds", i, i+3)
+		if _, err := d.Trigger(ctx, "audit", "x"); err != nil {
+			t.Fatal(err)
+		}
+		wait(t, d)
+	}
+	if got := strings.Join(c.kinds(), ","); got != "failed" {
+		t.Errorf("notifications = %s, want one failed", got)
+	}
+	st := d.Handle(ctx, api.Request{Op: "status"}).Status
+	inc := d.Handle(ctx, api.Request{Op: "incidents"}).Incidents
+	if st.Incidents != 1 || len(inc) != 1 || inc[0].Count != 3 {
+		t.Fatalf("status=%d incidents=%+v", st.Incidents, inc)
+	}
+	if r := d.Handle(ctx, api.Request{Op: "ack", ID: inc[0].Signature}); r.Error != "" {
+		t.Fatal(r.Error)
+	}
+	if st := d.Handle(ctx, api.Request{Op: "status"}).Status; st.Incidents != 0 {
+		t.Error("acked incident still counted")
+	}
+	// A success resolves it.
+	a.fail = nil
+	d.Trigger(ctx, "audit", "x")
+	wait(t, d)
+	if inc := d.Handle(ctx, api.Request{Op: "incidents"}).Incidents; len(inc) != 0 {
+		t.Errorf("still open after success: %+v", inc)
+	}
+}
+
+func TestQuotaHoldParksTheFleet(t *testing.T) {
+	ctx := context.Background()
+	d, a := newDaemon(t, &fakeGH{prs: map[string]github.PR{}})
+	c := withNotify(t, d)
+	now := time.Now()
+	d.now = func() time.Time { return now }
+	a.fail = &runner.Limit{Text: "You've hit your limit", Until: now.Add(2 * time.Hour)}
+	d.Trigger(ctx, "audit", "x")
+	wait(t, d)
+	st := d.Handle(ctx, api.Request{Op: "status"}).Status
+	if !st.QuotaUntil.Equal(now.Add(2*time.Hour).Truncate(time.Second)) || st.Incidents != 0 {
+		t.Fatalf("hold=%v incidents=%d", st.QuotaUntil, st.Incidents)
+	}
+	calls := a.calls
+	if _, err := d.Trigger(ctx, "audit", "x"); err == nil || !strings.Contains(err.Error(), "quota hold") {
+		t.Errorf("trigger during hold: %v", err)
+	}
+	d.tick(ctx) // schedules nothing, announces once
+	d.tick(ctx)
+	wait(t, d)
+	if a.calls != calls {
+		t.Errorf("agent ran during the hold: %d calls", a.calls-calls)
+	}
+	if got := strings.TrimPrefix(strings.Join(c.kinds(), ","), "digest,"); got != "needs-human" {
+		t.Errorf("notifications = %s, want one hold notice and no failure", got)
+	}
+	// Past the window, work resumes without anyone touching it.
+	now = now.Add(3 * time.Hour)
+	a.fail = nil
+	if _, err := d.Trigger(ctx, "audit", "x"); err != nil {
+		t.Errorf("after the hold: %v", err)
+	}
+	wait(t, d)
+	// The operator can lift a hold early.
+	d.Store.SetQuotaHold(ctx, now.Add(time.Hour), "x")
+	d.Handle(ctx, api.Request{Op: "quota", Value: "clear"})
+	if _, err := d.Trigger(ctx, "audit", "x"); err != nil {
+		t.Errorf("after clear: %v", err)
+	}
+	wait(t, d)
 }

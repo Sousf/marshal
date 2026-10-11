@@ -203,7 +203,7 @@ CREATE TABLE IF NOT EXISTS trust (
 `
 
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(schema); err != nil {
+	if _, err := s.db.Exec(schema + incidentSchema); err != nil {
 		return err
 	}
 	// Columns added after the first release. SQLite has no ADD COLUMN IF NOT

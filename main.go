@@ -74,6 +74,9 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
   marshal trust                   where each repo and class sits on the ladder
   marshal status                  is the daemon up, is autonomy on, what is running
   marshal autonomy on|off         the kill switch: off stops every auto-merge
+  marshal incidents [--all]       failures that keep happening, one line per signature
+  marshal ack <signature>         stop the daily reminder for an incident; a success closes it
+  marshal quota [clear]           the quota hold, if any; clear lifts it early
   marshal notify test             send a test notification through the configured channels
   marshal digest                  print the daily summary
   marshal app create [--name N]   create and install the MARSHAL GitHub App (two clicks in a browser)
@@ -214,6 +217,12 @@ func app(args []string) error {
 		return nil
 	case "autonomy":
 		return cmdAutonomy(ctx, rest)
+	case "incidents":
+		return cmdIncidents(ctx, rest)
+	case "ack":
+		return cmdAck(ctx, rest)
+	case "quota":
+		return cmdQuota(ctx, rest)
 	case "verify":
 		return cmdVerify(ctx, fleet, rest)
 	case "app":
@@ -298,7 +307,7 @@ func cmdVerify(ctx context.Context, f *config.Fleet, args []string) error {
 	if err != nil {
 		return err
 	}
-	v := &verifier.Verifier{Fleet: f, Adapter: runner.Claude{}, WorkRoot: filepath.Join(config.StateDir(), "work"), Log: os.Stdout, Auth: app}
+	v := &verifier.Verifier{Fleet: f, Adapter: agent(f, st), WorkRoot: filepath.Join(config.StateDir(), "work"), Log: os.Stdout, Auth: app}
 	res, err := v.Verify(ctx, r, pr)
 	if err != nil {
 		return err
@@ -617,7 +626,7 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	} else {
 		logger.Printf("no notify channels configured; events go to this log only")
 	}
-	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule, Notify: n, LogPath: logFile}
+	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{Never: f.Never.Tools}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule, Notify: n, LogPath: logFile}
 	if !d.Adapter.Available() {
 		logger.Printf("warning: %s is not on PATH; scheduled runs will fail until it is", "claude")
 	}
@@ -854,6 +863,12 @@ func cmdStatus(ctx context.Context) error {
 	if s.LastError != "" {
 		fmt.Printf("last error: %s\n", s.LastError)
 	}
+	if !s.QuotaUntil.IsZero() {
+		fmt.Printf("quota hold: until %s (%s); marshal quota clear lifts it\n", s.QuotaUntil.Local().Format("Mon 15:04"), s.QuotaWhy)
+	}
+	if s.Incidents > 0 {
+		fmt.Printf("incidents: %d open; marshal incidents\n", s.Incidents)
+	}
 	if pid, err := readPid(); err == nil {
 		fmt.Printf("detached: pid %d, log %s\n", pid, logPath())
 	}
@@ -1026,7 +1041,7 @@ func cmdRun(ctx context.Context, f *config.Fleet, args []string) error {
 	if err != nil {
 		return err
 	}
-	x := &run.Executor{Fleet: f, Store: st, Adapter: runner.Claude{}, Auth: app}
+	x := &run.Executor{Fleet: f, Store: st, Adapter: agent(f, st), Auth: app}
 	rec, err := x.Execute(ctx, pos[0], pos[1], opts)
 	if err != nil {
 		return err

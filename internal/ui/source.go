@@ -116,7 +116,18 @@ var ErrNoDaemon = errors.New("needs the daemon: start it with `marshal serve`")
 func (l Local) Status(ctx context.Context) (api.Status, error) {
 	spend, _ := l.Store.SpendSince(ctx, time.Now().Add(-24*time.Hour))
 	v, _ := l.Store.Setting(ctx, "autonomy", "on")
-	return api.Status{Version: "(no daemon)", Autonomy: v == "on", Repos: len(l.Fleet.Repos), Jobs: len(l.Fleet.Jobs), Spend24h: spend}, nil
+	st := api.Status{Version: "(no daemon)", Autonomy: v == "on", Repos: len(l.Fleet.Repos), Jobs: len(l.Fleet.Jobs), Spend24h: spend}
+	if u, why := l.Store.QuotaHold(ctx); u.After(time.Now()) {
+		st.QuotaUntil, st.QuotaWhy = u, why
+	}
+	if open, err := l.Store.ListIncidents(ctx, false); err == nil {
+		for _, i := range open {
+			if i.AckedAt.IsZero() {
+				st.Incidents++
+			}
+		}
+	}
+	return st, nil
 }
 
 func (l Local) Runs(ctx context.Context, repo string, limit int) ([]store.Run, error) {

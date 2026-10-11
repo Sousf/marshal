@@ -170,3 +170,34 @@ func TestPaths(t *testing.T) {
 		t.Errorf("path = %q", Path())
 	}
 }
+
+func TestNeverFloor(t *testing.T) {
+	f, err := Parse([]byte(good + `
+never:
+  paths: ["infra/**"]
+  tools: ["Bash(go:*)", "WebFetch"]
+  auto_merge: ["a/*", "*/deps"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _ := f.Job("j1")
+	r := f.Resolve(j)
+	if strings.Contains(strings.Join(r.AllowedTools, ","), "Bash(go:*)") {
+		t.Errorf("a never tool stayed allowed: %v", r.AllowedTools)
+	}
+	if got := strings.Join(r.DisallowedTools, ","); got != "Bash(git push:*),Bash(go:*),WebFetch" {
+		t.Errorf("disallowed = %q", got)
+	}
+	for _, c := range []struct {
+		repo, class string
+		hold        bool
+	}{{"a", "c1", true}, {"b", "deps", true}, {"b", "c1", false}} {
+		if got := f.Never.HoldsMerge(c.repo, c.class); got != c.hold {
+			t.Errorf("HoldsMerge(%s,%s) = %v", c.repo, c.class, got)
+		}
+	}
+	if _, err := Parse([]byte(good + "never:\n  auto_merge: [\"[\"]\n")); err == nil {
+		t.Error("a malformed pattern must not load")
+	}
+}

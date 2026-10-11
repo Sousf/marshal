@@ -190,6 +190,12 @@ func (m Model) statusLine() string {
 	} else {
 		parts = append(parts, sDim.Render("idle"))
 	}
+	if u := m.status.QuotaUntil; u.After(time.Now()) {
+		parts = append(parts, sBad.Render("quota hold until "+u.Local().Format("15:04")))
+	}
+	if n := m.status.Incidents; n > 0 {
+		parts = append(parts, sWarn.Render(fmt.Sprintf("%d incident(s)", n)))
+	}
 	parts = append(parts, sDim.Render(fmt.Sprintf("$%.2f / 24h", m.status.Spend24h)))
 	return strings.Join(parts, sFaint.Render("  │  "))
 }

@@ -138,3 +138,20 @@ func TestPreflightRequiresNewWorkflowToPass(t *testing.T) {
 		t.Errorf("fixed CI: %s calls=%d %q", rec.Status, a.calls, rec.Error)
 	}
 }
+
+func TestNeverPathsBlockEveryJob(t *testing.T) {
+	o := origin(t)
+	f := fleet(t, o)
+	f.Never.Paths = []string{"infra/**"}
+	st, _ := store.Open(filepath.Join(t.TempDir(), "m.db"))
+	defer st.Close()
+	a := &stepwise{steps: []func(string){func(d string) {
+		os.MkdirAll(filepath.Join(d, "infra"), 0o755)
+		os.WriteFile(filepath.Join(d, "infra", "main.tf"), []byte("x"), 0o644)
+	}}}
+	x := &Executor{Fleet: f, Store: st, Adapter: a, WorkRoot: t.TempDir()}
+	rec, _ := x.Execute(context.Background(), "anywhere", "x", Options{NoPR: true})
+	if rec.Status != store.Blocked || !strings.Contains(rec.Error, "infra/**") {
+		t.Errorf("status=%s err=%q", rec.Status, rec.Error)
+	}
+}

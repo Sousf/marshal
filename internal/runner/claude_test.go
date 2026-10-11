@@ -116,3 +116,16 @@ func TestSummarise(t *testing.T) {
 		t.Error("tool with no known argument should be its bare name")
 	}
 }
+
+func TestArgsNeverFloor(t *testing.T) {
+	// The floor reaches every request, including ones whose caller built
+	// its own tool lists and never saw the fleet file.
+	args := Claude{Never: []string{"WebFetch", "Bash(curl:*)"}}.Args(Request{
+		AllowedTools:    []string{"Read", "WebFetch"},
+		DisallowedTools: []string{"Bash(curl:*)"},
+	})
+	s := strings.Join(args, " ")
+	if !strings.Contains(s, "--allowedTools Read --disallowedTools Bash(curl:*) WebFetch") {
+		t.Errorf("floor not applied:\n%s", s)
+	}
+}

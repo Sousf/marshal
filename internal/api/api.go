@@ -22,7 +22,10 @@ import (
 
 // Request is one call to the daemon.
 type Request struct {
-	// Op is one of: status, runs, run, events, trigger, task, fix, autonomy, trust, verdict, log.
+	// Op is one of: status, runs, run, events, trigger, task, fix, autonomy,
+	// trust, verdict, log, incidents, ack, quota. For ack, ID is a signature
+	// prefix; for quota, Value "clear" lifts the hold; for incidents, Value
+	// "all" includes resolved ones.
 	// For task, Value is the instruction, Repo optional, Job an optional name.
 	Op    string `json:"op"`
 	Repo  string `json:"repo,omitempty"`
@@ -46,6 +49,11 @@ type Status struct {
 	Spend24h  float64   `json:"spend_24h"`
 	LastTick  time.Time `json:"last_tick"`
 	LastError string    `json:"last_error,omitempty"`
+	// QuotaUntil is set while a quota hold parks every agent run.
+	QuotaUntil time.Time `json:"quota_until,omitempty"`
+	QuotaWhy   string    `json:"quota_why,omitempty"`
+	// Incidents counts open incidents nobody has acked.
+	Incidents int `json:"incidents,omitempty"`
 }
 
 // Response is the daemon's answer.
@@ -57,6 +65,8 @@ type Response struct {
 	Run    *store.Run    `json:"run,omitempty"`
 	Events []store.Event `json:"events,omitempty"`
 	Trust  []store.Trust `json:"trust,omitempty"`
+	// Incidents answers the incidents op.
+	Incidents []store.Incident `json:"incidents,omitempty"`
 	// Verdict is the latest verifier verdict for a run, when one exists.
 	Verdict *store.Verdict `json:"verdict,omitempty"`
 	// ID is the run started by trigger.

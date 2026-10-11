@@ -60,9 +60,10 @@ func Command(ctx context.Context, f *config.Fleet, st *store.Store, status *api.
 		"--append-system-prompt", SystemPrompt(f, status, recent),
 		"--allowedTools",
 	}
-	args = append(args, Allowed...)
+	args = append(args, config.Without(Allowed, f.Never.Tools)...)
 	args = append(args, "--disallowedTools")
 	args = append(args, Disallowed...)
+	args = append(args, f.Never.Tools...)
 
 	session, _ := st.Setting(ctx, sessionKey, "")
 	if opts.New || session == "" {

@@ -257,9 +257,9 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		return finish(store.Failed, err.Error())
 	}
 	changes := policy.ParseNumstat(numstat)
-	var extraLocked []string
+	extraLocked := append([]string{}, x.Fleet.Never.Paths...)
 	if con != nil {
-		extraLocked = con.Locked
+		extraLocked = append(extraLocked, con.Locked...)
 	}
 	if v := policy.CheckWith(job, extraLocked, changes); len(v) > 0 {
 		var b strings.Builder
@@ -460,9 +460,9 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	// cap still do, and the verifier reads the whole diff.
 	fixJob := job
 	fixJob.Paths = nil
-	var extraLocked []string
+	extraLocked := append([]string{}, x.Fleet.Never.Paths...)
 	if con != nil {
-		extraLocked = con.Locked
+		extraLocked = append(extraLocked, con.Locked...)
 	}
 	if v := policy.CheckWith(fixJob, extraLocked, changes); len(v) > 0 {
 		var vb strings.Builder

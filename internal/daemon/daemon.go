@@ -6,6 +6,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -78,6 +79,8 @@ type Daemon struct {
 	lastErr  string
 	// now is swapped in tests.
 	now func() time.Time
+	// guard wraps Adapter in the quota guard exactly once.
+	guard sync.Once
 }
 
 // maxConcurrentTasks bounds repo-less tasks in flight at once.
@@ -104,6 +107,81 @@ func (d *Daemon) init() {
 	}
 	if d.base == nil {
 		d.base = context.Background()
+	}
+	d.guard.Do(func() {
+		if _, ok := d.Adapter.(runner.Guard); ok || d.Adapter == nil || d.Store == nil {
+			return
+		}
+		d.Adapter = runner.Guard{
+			Adapter:   d.Adapter,
+			HeldUntil: func(ctx context.Context) time.Time { u, _ := d.Store.QuotaHold(ctx); return u },
+			Hold: func(ctx context.Context, u time.Time, why string) {
+				if err := d.Store.SetQuotaHold(ctx, u, why); err != nil {
+					d.fail("quota hold: %v", err)
+				}
+			},
+			Now: func() time.Time { return d.now() },
+		}
+	})
+}
+
+// held returns the quota hold in force; ok is false when there is none.
+func (d *Daemon) held(ctx context.Context) (time.Time, bool) {
+	u, _ := d.Store.QuotaHold(ctx)
+	return u, u.After(d.now())
+}
+
+// heldErr refuses new agent work while a quota hold is in force.
+func (d *Daemon) heldErr(ctx context.Context) error {
+	if u, ok := d.held(ctx); ok {
+		return fmt.Errorf("quota hold until %s; no agent runs until then (marshal quota clear lifts it)", u.Local().Format("Mon 15:04"))
+	}
+	return nil
+}
+
+// announceHold tells the operator once per hold.
+func (d *Daemon) announceHold(ctx context.Context) {
+	u, ok := d.held(ctx)
+	if !ok || !d.Store.ClaimQuotaNotice(ctx, u) {
+		return
+	}
+	_, why := d.Store.QuotaHold(ctx)
+	d.Log.Printf("quota hold until %s: %s", u.Format(time.RFC3339), why)
+	d.send(ctx, notify.Event{Kind: notify.NeedsHuman, Title: "quota hold until " + u.Local().Format("Mon 15:04"), Body: why + "\nScheduled work resumes on its own after the hold."})
+}
+
+// incident records a failed run and notifies only when its signature is
+// new, back after resolving, or due its daily reminder. Quota stops are
+// left to the hold, which announces itself once.
+func (d *Daemon) incident(repo, job string, rec store.Run, title, url string) {
+	if strings.HasPrefix(rec.Error, "quota:") {
+		return
+	}
+	inc, tell, err := d.Store.RecordIncident(d.base, repo, job, rec.Error, rec.ID, d.now())
+	if err != nil {
+		d.fail("run %s: incident: %v", rec.ID, err)
+		tell = true
+	}
+	if !tell {
+		d.Log.Printf("run %s: incident %s seen %d times; not notifying again", rec.ID, inc.Signature, inc.Count)
+		return
+	}
+	body := firstLine(rec.Error)
+	if inc.Count > 1 {
+		body += fmt.Sprintf("\nSeen %d times since %s.", inc.Count, inc.FirstAt.Local().Format("Jan 2 15:04"))
+	}
+	if inc.Signature != "" {
+		body += "\nmarshal ack " + inc.Signature + " silences the reminders."
+	}
+	d.send(d.base, notify.Event{Kind: notify.Failed, Title: title, Body: body, URL: url})
+}
+
+// resolve closes a repo and job's incidents after a success.
+func (d *Daemon) resolve(repo, job string) {
+	if n, err := d.Store.ResolveIncidents(d.base, repo, job, d.now()); err != nil {
+		d.fail("incidents: %v", err)
+	} else if n > 0 {
+		d.Log.Printf("%s on %s succeeded; %d incident(s) resolved", job, repo, n)
 	}
 }
 
@@ -190,8 +268,12 @@ func (d *Daemon) tick(ctx context.Context) {
 		d.fail("watch: %v", err)
 	}
 	d.maybeDigest(ctx)
+	d.announceHold(ctx)
 	if d.NoSchedule {
 		return
+	}
+	if _, ok := d.held(ctx); ok {
+		return // scheduled work waits; it is due again the moment the hold lifts
 	}
 	if err := d.schedule(ctx); err != nil {
 		d.fail("schedule: %v", err)
@@ -330,6 +412,8 @@ func (d *Daemon) mayMerge(ctx context.Context, ladder policy.Ladder, repo config
 		return "", "" // review or locked: nothing to log every tick
 	}
 	switch {
+	case d.Fleet.Never.HoldsMerge(repo.Name, r.Class):
+		return "", "the fleet's never.auto_merge floor holds " + repo.Name + "/" + r.Class + " for a human"
 	case r.Sensitive:
 		return "", "touches paths the repository's contract marks sensitive; a human must review"
 	case pr.Checks == "":
@@ -392,7 +476,7 @@ func (d *Daemon) botLogin() string {
 // answered twice, and the per-PR cap is shared with check fixes.
 func (d *Daemon) addressReview(ctx context.Context, repo config.Repo, r store.Run, pr github.PR) {
 	cap := d.Fleet.Policy.Caps.FixAttempts()
-	if cap == 0 || d.busy(repo.Name) {
+	if cap == 0 || d.busy(repo.Name) || d.heldErr(ctx) != nil {
 		return
 	}
 	prior, err := d.Store.Followups(ctx, r.ID)
@@ -556,6 +640,9 @@ func (d *Daemon) Fix(ctx context.Context, runID string) (string, error) {
 // startFix launches the follow-up goroutine; the caller has checked the
 // cap, the busy map and the head.
 func (d *Daemon) startFix(ctx context.Context, repo config.Repo, r store.Run, pr github.PR, why string) (string, error) {
+	if err := d.heldErr(ctx); err != nil {
+		return "", err
+	}
 	slug := repo.GitHub
 	if slug == "" {
 		slug, _ = github.Slug(repo.URL)
@@ -600,7 +687,7 @@ func (d *Daemon) startFix(ctx context.Context, repo config.Repo, r store.Run, pr
 			}
 			_ = d.GH.CommentPR(d.base, r.PRURL, fmt.Sprintf("MARSHAL could not fix the failing checks (run `%s`, %s).\n\n%s", id, rec.Status, msg))
 			if rec.Status != store.NoChange {
-				d.send(d.base, notify.Event{Kind: notify.Failed, Title: repo.Name + ": fix attempt " + string(rec.Status), Body: firstLine(msg), URL: r.PRURL})
+				d.incident(repo.Name, "fix-checks", rec, repo.Name+": fix attempt "+string(rec.Status), r.PRURL)
 			}
 		}
 	}()
@@ -823,6 +910,9 @@ func ago(t, now time.Time) string {
 // same commit is never paid for twice; a failure to verify is recorded as
 // UNSURE for the same reason.
 func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
+	if d.heldErr(ctx) != nil {
+		return // verified after the hold; an UNSURE now would stick to this head
+	}
 	d.mu.Lock()
 	if d.verifying[r.ID] {
 		d.mu.Unlock()
@@ -840,6 +930,12 @@ func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
 			d.mu.Unlock()
 		}()
 		res, err := v.Verify(bg, r, pr)
+		var lim *runner.Limit
+		if errors.As(err, &lim) {
+			// Not a verdict on the change: try the same head after the hold.
+			d.note(bg, r.ID, "verifier deferred: %v", err)
+			return
+		}
 		if err != nil {
 			d.fail("run %s: verify: %v", r.ID, err)
 			res.RunID = r.ID
@@ -1073,6 +1169,9 @@ func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) 
 	if _, ok := d.Fleet.Repo(repo); !ok {
 		return "", fmt.Errorf("unknown repo %q", repo)
 	}
+	if err := d.heldErr(ctx); err != nil {
+		return "", err
+	}
 	d.mu.Lock()
 	if id, ok := d.running[repo]; ok {
 		d.mu.Unlock()
@@ -1101,11 +1200,15 @@ func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) 
 		case store.Failed, store.Blocked, store.Cancelled:
 			d.Log.Printf("run %s: %s: %s", id, rec.Status, firstLine(rec.Error))
 			if rec.Status != store.Cancelled {
-				d.send(d.base, notify.Event{Kind: notify.Failed, Title: repo + ": " + job + " " + string(rec.Status), Body: firstLine(rec.Error), URL: rec.PRURL})
+				d.incident(repo, job, rec, repo+": "+job+" "+string(rec.Status), rec.PRURL)
 			}
 		case store.Proposed:
 			d.Log.Printf("run %s: %s %s", id, rec.Status, rec.PRURL)
+			d.resolve(repo, job)
 			d.send(d.base, notify.Event{Kind: notify.Proposed, Title: repo + ": PR opened by " + job, Body: firstLine(rec.Summary), URL: rec.PRURL})
+		case store.NoChange, store.Committed:
+			d.Log.Printf("run %s: %s", id, rec.Status)
+			d.resolve(repo, job)
 		default:
 			d.Log.Printf("run %s: %s %s", id, rec.Status, rec.PRURL)
 		}
@@ -1120,6 +1223,9 @@ func (d *Daemon) TriggerTask(ctx context.Context, name, prompt, repoName, class 
 	d.init()
 	if strings.TrimSpace(prompt) == "" {
 		return "", fmt.Errorf("task: empty prompt")
+	}
+	if err := d.heldErr(ctx); err != nil {
+		return "", err
 	}
 	if name == "" {
 		name = "task"
@@ -1181,7 +1287,11 @@ func (d *Daemon) TriggerTask(ctx context.Context, name, prompt, repoName, class 
 		case store.Proposed:
 			d.send(d.base, notify.Event{Kind: notify.Proposed, Title: repo.Name + ": PR opened by task", Body: firstLine(rec.Summary), URL: rec.PRURL})
 		case store.Failed, store.Blocked:
-			d.send(d.base, notify.Event{Kind: notify.Failed, Title: "task " + string(rec.Status) + ": " + firstLine(prompt), Body: firstLine(rec.Error)})
+			where := ""
+			if repo != nil {
+				where = repo.Name
+			}
+			d.incident(where, "task:"+name, rec, "task "+string(rec.Status)+": "+firstLine(prompt), "")
 		}
 	}()
 	return id, nil
@@ -1236,7 +1346,46 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 			st.Spend24h += vs
 		}
 		st.Autonomy = d.Autonomy(ctx)
+		if u, ok := d.held(ctx); ok {
+			st.QuotaUntil = u
+			_, st.QuotaWhy = d.Store.QuotaHold(ctx)
+		}
+		if open, err := d.Store.ListIncidents(ctx, false); err == nil {
+			for _, i := range open {
+				if i.AckedAt.IsZero() {
+					st.Incidents++
+				}
+			}
+		}
 		return api.Response{Status: st}
+	case "incidents":
+		inc, err := d.Store.ListIncidents(ctx, req.Value == "all")
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{Incidents: inc}
+	case "ack":
+		inc, err := d.Store.AckIncident(ctx, req.ID, d.now())
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{Text: "acked " + inc.Signature + " (" + inc.Repo + " " + inc.Job + "): " + inc.Sample}
+	case "quota":
+		switch req.Value {
+		case "clear":
+			if err := d.Store.SetQuotaHold(ctx, time.Time{}, ""); err != nil {
+				return api.Fail("%v", err)
+			}
+			d.Log.Printf("quota hold cleared by the operator")
+			return api.Response{Text: "quota hold cleared"}
+		case "":
+			if u, ok := d.held(ctx); ok {
+				_, why := d.Store.QuotaHold(ctx)
+				return api.Response{Text: "held until " + u.Local().Format("Mon Jan 2 15:04") + ": " + why}
+			}
+			return api.Response{Text: "no quota hold"}
+		}
+		return api.Fail("quota: want clear or nothing")
 	case "runs":
 		runs, err := d.Store.ListRuns(ctx, req.Repo, req.Limit)
 		if err != nil {

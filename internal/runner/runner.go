@@ -84,6 +84,8 @@ type Result struct {
 	Stop string
 	// Structured is the schema-shaped answer when one was requested.
 	Structured json.RawMessage
+	// Limit is set when the run stopped on a quota or rate limit.
+	Limit *Limit
 }
 
 // Adapter runs an agent.

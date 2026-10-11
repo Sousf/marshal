@@ -17,6 +17,9 @@ import (
 type Claude struct {
 	// Binary overrides the executable name. Empty means "claude" on PATH.
 	Binary string
+	// Never is the fleet's tool deny floor, added to every request here so
+	// no caller can forget it.
+	Never []string
 }
 
 // Name implements Adapter.
@@ -65,13 +68,15 @@ func (c Claude) Args(req Request) []string {
 	if req.PermissionMode != "" {
 		args = append(args, "--permission-mode", req.PermissionMode)
 	}
-	if len(req.AllowedTools) > 0 {
+	allowed := withoutAny(req.AllowedTools, c.Never)
+	disallowed := appendNew(append([]string{}, req.DisallowedTools...), c.Never)
+	if len(allowed) > 0 {
 		args = append(args, "--allowedTools")
-		args = append(args, req.AllowedTools...)
+		args = append(args, allowed...)
 	}
-	if len(req.DisallowedTools) > 0 {
+	if len(disallowed) > 0 {
 		args = append(args, "--disallowedTools")
-		args = append(args, req.DisallowedTools...)
+		args = append(args, disallowed...)
 	}
 	if req.SystemPrompt != "" {
 		args = append(args, "--append-system-prompt", req.SystemPrompt)
@@ -123,9 +128,19 @@ func (c Claude) Run(ctx context.Context, req Request, emit func(Event)) (Result,
 	if res.Duration == 0 {
 		res.Duration = time.Since(started)
 	}
+	if res.Limit == nil && (res.IsError || werr != nil) && ctx.Err() == nil {
+		// Only the harness's own error text, never a successful report.
+		text := stderr.String()
+		if res.IsError {
+			text = res.Output + "\n" + text
+		}
+		res.Limit = DetectLimit(text, time.Now())
+	}
 	switch {
 	case ctx.Err() != nil:
 		return res, ctx.Err()
+	case res.Limit != nil:
+		return res, res.Limit
 	case perr != nil:
 		return res, perr
 	case werr != nil:
@@ -151,14 +166,20 @@ type event struct {
 		} `json:"content"`
 	} `json:"message"`
 	// result fields
-	Result            string          `json:"result"`
-	IsError           bool            `json:"is_error"`
-	CostUSD           float64         `json:"total_cost_usd"`
-	NumTurns          int             `json:"num_turns"`
-	DurationMS        int64           `json:"duration_ms"`
-	SessionID         string          `json:"session_id"`
-	TerminalReason    string          `json:"terminal_reason"`
-	Structured        json.RawMessage `json:"structured_output"`
+	Result         string          `json:"result"`
+	IsError        bool            `json:"is_error"`
+	CostUSD        float64         `json:"total_cost_usd"`
+	NumTurns       int             `json:"num_turns"`
+	DurationMS     int64           `json:"duration_ms"`
+	SessionID      string          `json:"session_id"`
+	TerminalReason string          `json:"terminal_reason"`
+	Structured     json.RawMessage `json:"structured_output"`
+	// rate_limit_event fields
+	RateLimit *struct {
+		Status   string `json:"status"`
+		ResetsAt int64  `json:"resetsAt"`
+		Type     string `json:"rateLimitType"`
+	} `json:"rate_limit_info"`
 	PermissionDenials []struct {
 		ToolName  string          `json:"tool_name"`
 		ToolInput json.RawMessage `json:"tool_input"`
@@ -195,6 +216,15 @@ func ParseStream(r io.Reader, emit func(Event)) (Result, error) {
 				case "tool_use":
 					emit(Event{At: now, Kind: Tool, Tool: c.Name, Input: c.Input, Text: Summarise(c.Name, c.Input)})
 				}
+			}
+		case "rate_limit_event":
+			if rl := e.RateLimit; rl != nil && rl.Status == "rejected" {
+				l := &Limit{Text: "rate limit rejected (" + rl.Type + ")"}
+				if rl.ResetsAt > 0 {
+					l.Until = time.Unix(rl.ResetsAt, 0)
+				}
+				res.Limit = l
+				emit(Event{At: now, Kind: Note, Text: l.Error()})
 			}
 		case "result":
 			sawResult = true
@@ -310,3 +340,31 @@ func (t *tail) Write(p []byte) (int, error) {
 }
 
 func (t *tail) String() string { return string(t.buf) }
+
+func withoutAny(tools, deny []string) []string {
+	var out []string
+	for _, t := range tools {
+		if !contains(deny, t) {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+func appendNew(list, more []string) []string {
+	for _, m := range more {
+		if !contains(list, m) {
+			list = append(list, m)
+		}
+	}
+	return list
+}
+
+func contains(list []string, s string) bool {
+	for _, l := range list {
+		if l == s {
+			return true
+		}
+	}
+	return false
+}

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -59,6 +60,9 @@ type Fleet struct {
 	Memory Memory `yaml:"memory"`
 	// Tasks are scheduled free-form instructions, with or without a repo.
 	Tasks []Task `yaml:"tasks"`
+	// Never is the deny floor. Nothing a job, task, chat, contract or trust
+	// level says can lift it.
+	Never Never `yaml:"never"`
 
 	// dir is where the file was read from; relative prompt paths resolve
 	// against it.
@@ -108,6 +112,31 @@ func (f *Fleet) MemoryRepo() (Repo, string, bool) {
 		dir = "skills"
 	}
 	return r, dir, true
+}
+
+// Never lists what no run may do, whatever else is configured. It only adds
+// restrictions: paths join the locked set, tools join every agent's
+// disallowed list (jobs, tasks, follow-ups, the verifier and chat), and
+// auto_merge patterns hold matching proposals for a human at any level.
+type Never struct {
+	// Paths are locked globs, the same syntax as a job's paths.
+	Paths []string `yaml:"paths"`
+	// Tools use the harness's pattern syntax, for example "Bash(curl:*)".
+	Tools []string `yaml:"tools"`
+	// AutoMerge holds "repo/class" globs, for example "marshal/*" or
+	// "*/deps", that never merge without a human.
+	AutoMerge []string `yaml:"auto_merge"`
+}
+
+// HoldsMerge reports whether the floor forbids merging a repo's class
+// without a human.
+func (n Never) HoldsMerge(repo, class string) bool {
+	for _, p := range n.AutoMerge {
+		if ok, _ := path.Match(p, repo+"/"+class); ok {
+			return true
+		}
+	}
+	return false
 }
 
 // Notify configures notification channels. Any subset may be set.
@@ -469,6 +498,16 @@ func (f *Fleet) validate() error {
 			}
 		}
 	}
+	for _, p := range append(append([]string{}, f.Never.Paths...), f.Never.AutoMerge...) {
+		if _, err := path.Match(strings.TrimPrefix(p, "**/"), "x"); err != nil {
+			errs = append(errs, fmt.Errorf("never: bad pattern %q: %w", p, err))
+		}
+	}
+	for _, t := range f.Never.Tools {
+		if strings.TrimSpace(t) == "" {
+			errs = append(errs, errors.New("never.tools: empty entry"))
+		}
+	}
 	if g := f.GitHubApp; g.Set() && (g.AppID == 0 || g.InstallationID == 0 || g.PrivateKeyFile == "") {
 		errs = append(errs, errors.New("github_app: app_id, installation_id and private_key_file are all required"))
 	}
@@ -530,7 +569,8 @@ func (f *Fleet) Resolve(j Job) Resolved {
 		r.PermissionMode = d.PermissionMode
 	}
 	r.AllowedTools = dedupe(append(append([]string{}, d.AllowedTools...), j.AllowedTools...))
-	r.DisallowedTools = dedupe(append(append([]string{}, d.DisallowedTools...), j.DisallowedTools...))
+	r.DisallowedTools = dedupe(append(append(append([]string{}, d.DisallowedTools...), j.DisallowedTools...), f.Never.Tools...))
+	r.AllowedTools = Without(r.AllowedTools, f.Never.Tools)
 	return r
 }
 
@@ -569,6 +609,28 @@ func (f *Fleet) StartLevel(repo Repo, class string) Level {
 		return c.Start
 	}
 	return Review
+}
+
+// Without drops every entry of deny from tools, so an allow never sits
+// beside the deny it contradicts, whatever the harness does with the pair.
+func Without(tools, deny []string) []string {
+	if len(deny) == 0 {
+		return tools
+	}
+	out := make([]string, 0, len(tools))
+	for _, t := range tools {
+		denied := false
+		for _, d := range deny {
+			if t == d {
+				denied = true
+				break
+			}
+		}
+		if !denied {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func dedupe(in []string) []string {
