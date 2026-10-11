@@ -96,7 +96,7 @@ func TestArgs(t *testing.T) {
 	for _, want := range []string{"-p", "--output-format stream-json", "--model m", "--effort high",
 		"--max-turns 30", "--max-budget-usd 2.50", "--permission-mode acceptEdits",
 		"--allowedTools Read Bash(go:*)", "--append-system-prompt conventions", "--no-session-persistence",
-		"--setting-sources project"} {
+		"--setting-sources project", "--strict-mcp-config"} {
 		if !strings.Contains(s, want) {
 			t.Errorf("args missing %q:\n%s", want, s)
 		}

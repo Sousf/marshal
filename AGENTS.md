@@ -85,3 +85,10 @@ substitute a fake. Stream parsing is tested against recorded output.
 
 Comments explain why, not what. A comment that restates the next line is
 deleted.
+
+## Learned by MARSHAL
+
+Facts recorded by MARSHAL from its own runs, reviewed in the pull requests that added them.
+
+- `runner.Claude` passes `--strict-mcp-config` and sets `ENABLE_CLAUDEAI_MCP_SERVERS=false`, so agent runs load no MCP servers. `--setting-sources project` on its own lets the account's claude.ai connectors and a repo's `.mcp.json` through.
+- The daemon deletes the `events` rows of runs that finished more than 30 days ago, once a day (`daemon.maybePrune`, `store.PruneEvents`). Run rows and verdicts are kept.
