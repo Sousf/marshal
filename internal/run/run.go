@@ -215,8 +215,10 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		Env:             agentEnv,
 		ExtraDirs:       mem.extraDirs(),
 	}
+	tr := &transcript{}
 	result, runErr := x.Adapter.Run(ctx, req, func(e runner.Event) {
 		logf(string(e.Kind), "%s", e.Text)
+		tr.add(e)
 	})
 	rec.Turns = result.Turns
 	rec.CostUSD = result.CostUSD
@@ -233,6 +235,11 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 	x.recordLessons(ws, result.Output, logf)
 	if _, props := skills.ParseProposals(result.Output, repo.Name+"/"+rec.ID); len(props) > 0 {
 		mem.propose(ctx, x, rec, props, opts.NoPR, logf)
+	} else {
+		t, c := x.nudge(ctx, mem, rec, job.Name, repo.Name, result.Output, tr, opts.NoPR, logf)
+		result.Turns += t
+		result.CostUSD += c
+		rec.Turns, rec.CostUSD = result.Turns, result.CostUSD
 	}
 
 	changed, err := ws.Changed(ctx)
@@ -726,7 +733,8 @@ func (x *Executor) report(ctx context.Context, name, prompt string, opts Options
 		DisallowedTools: res.DisallowedTools,
 		ExtraDirs:       mem.extraDirs(),
 	}
-	result, runErr := x.Adapter.Run(ctx, req, func(e runner.Event) { logf(string(e.Kind), "%s", e.Text) })
+	tr := &transcript{}
+	result, runErr := x.Adapter.Run(ctx, req, func(e runner.Event) { logf(string(e.Kind), "%s", e.Text); tr.add(e) })
 	rec.Turns = result.Turns
 	rec.CostUSD = result.CostUSD
 	rec.Summary = result.Output
@@ -741,6 +749,10 @@ func (x *Executor) report(ctx context.Context, name, prompt string, opts Options
 	}
 	if _, props := skills.ParseProposals(result.Output, "task/"+rec.ID); len(props) > 0 {
 		mem.propose(ctx, x, rec, props, opts.NoPR, logf)
+	} else {
+		t, c := x.nudge(ctx, mem, rec, "task", "no repository", result.Output, tr, opts.NoPR, logf)
+		rec.Turns += t
+		rec.CostUSD += c
 	}
 	report := result.Output
 	if b, err := os.ReadFile(filepath.Join(dir, "REPORT.md")); err == nil && strings.TrimSpace(string(b)) != "" {

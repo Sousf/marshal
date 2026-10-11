@@ -84,6 +84,27 @@ type Memory struct {
 	Repo string `yaml:"repo"`
 	// Dir defaults to "skills".
 	Dir string `yaml:"dir"`
+	// NudgeTurns is how long a run must be before a cheap model is asked
+	// whether it taught a skill. Zero means 20; negative turns it off.
+	NudgeTurns int `yaml:"nudge_turns"`
+	// NudgeModel answers the nudge. Empty means claude-sonnet-5-5.
+	NudgeModel string `yaml:"nudge_model"`
+}
+
+// Nudge resolves the skill nudge: the turn threshold, zero when off, and
+// the model.
+func (m Memory) Nudge() (int, string) {
+	turns, model := m.NudgeTurns, m.NudgeModel
+	switch {
+	case turns < 0:
+		turns = 0
+	case turns == 0:
+		turns = 20
+	}
+	if model == "" {
+		model = "claude-sonnet-5-5"
+	}
+	return turns, model
 }
 
 // Task is a free-form instruction. With Repo it ends in a pull request like
