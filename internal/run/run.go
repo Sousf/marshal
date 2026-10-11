@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/jobs"
 	"github.com/Sousf/marshal/internal/policy"
 	"github.com/Sousf/marshal/internal/runner"
@@ -42,6 +43,9 @@ type Executor struct {
 	Adapter runner.Adapter
 	// WorkRoot is where clones are made. Empty means <state>/work.
 	WorkRoot string
+	// Auth, when set, makes git, gh and the PR act as the GitHub App. The
+	// harness gets a full token; the agent gets a read-only one.
+	Auth *ghapp.App
 }
 
 // Label is put on every PR MARSHAL opens, so the review screen and a
@@ -93,7 +97,26 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	}
 
 	logf("note", "run %s: %s on %s (%s, %s)", rec.ID, job.Name, repo.Name, res.Model, res.Effort)
-	ws, err := workspace.Prepare(ctx, x.workRoot(), repo, job.Name, rec.ID, res.Identity, opts.Env)
+	harnessEnv, agentEnv := opts.Env, opts.Env
+	identity := res.Identity
+	if x.Auth != nil {
+		full, err := x.Auth.Env(ctx, ghapp.Full)
+		if err != nil {
+			return finish(store.Failed, err.Error())
+		}
+		ro, err := x.Auth.Env(ctx, ghapp.ReadOnly)
+		if err != nil {
+			return finish(store.Failed, err.Error())
+		}
+		harnessEnv = append(append([]string{}, opts.Env...), full...)
+		agentEnv = append(append([]string{}, opts.Env...), ro...)
+		repo.URL = ghapp.CloneURL(repo)
+		if identity.Name == "" {
+			identity = x.Auth.Identity()
+		}
+		logf("note", "acting as GitHub App %s", identity.Name)
+	}
+	ws, err := workspace.Prepare(ctx, x.workRoot(), repo, job.Name, rec.ID, identity, harnessEnv)
 	if err != nil {
 		return finish(store.Failed, err.Error())
 	}
@@ -114,7 +137,7 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 		PermissionMode:  res.PermissionMode,
 		AllowedTools:    res.AllowedTools,
 		DisallowedTools: res.DisallowedTools,
-		Env:             opts.Env,
+		Env:             agentEnv,
 	}
 	result, runErr := x.Adapter.Run(ctx, req, func(e runner.Event) {
 		logf(string(e.Kind), "%s", e.Text)

@@ -103,6 +103,7 @@ func TestValidation(t *testing.T) {
 		"dup job":         strings.Replace(good, "name: j2", "name: j1", 1),
 		"missing url":     strings.Replace(good, "url: u, ", "", 1),
 		"bad class start": strings.Replace(good, "start: review", "start: maybe", 1),
+		"partial app":     good + "\ngithub_app: {app_id: 1}\n",
 	}
 	for name, src := range cases {
 		if _, err := Parse([]byte(src)); err == nil {

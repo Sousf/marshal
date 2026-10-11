@@ -14,6 +14,7 @@ import (
 
 	"github.com/Sousf/marshal/internal/api"
 	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/policy"
 	"github.com/Sousf/marshal/internal/run"
@@ -45,7 +46,9 @@ type Daemon struct {
 	Tick time.Duration
 	// WorkRoot is passed to the executor. Empty means the default.
 	WorkRoot string
-	Log      *log.Logger
+	// Auth, when set, is the GitHub App every run and verification acts as.
+	Auth *ghapp.App
+	Log  *log.Logger
 
 	mu        sync.Mutex
 	running   map[string]string // repo -> run ID
@@ -274,7 +277,7 @@ func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
 	d.verifying[r.ID] = true
 	d.mu.Unlock()
 	d.note(ctx, r.ID, "verifying head %s", short(pr.HeadSHA))
-	v := &verifier.Verifier{Fleet: d.Fleet, Adapter: d.Adapter, WorkRoot: d.WorkRoot}
+	v := &verifier.Verifier{Fleet: d.Fleet, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
 	bg := context.WithoutCancel(ctx)
 	go func() {
 		defer func() {
@@ -461,7 +464,7 @@ func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) 
 	d.mu.Unlock()
 
 	d.Log.Printf("run %s: starting %s on %s", id, job, repo)
-	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot}
+	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
 	// Detached from the request's context: the trigger returns at once and
 	// the run lives as long as the daemon does.
 	runCtx := context.WithoutCancel(ctx)

@@ -22,6 +22,9 @@ import (
 type Client struct {
 	// Env is added to every invocation; GH_TOKEN for a scoped identity.
 	Env []string
+	// Auth, when set, supplies a fresh environment per call: the GitHub App
+	// token, which rotates hourly.
+	Auth func(ctx context.Context) ([]string, error)
 }
 
 // PR is the state of a pull request.
@@ -248,6 +251,13 @@ func Slug(url string) (string, bool) {
 func (c Client) gh(ctx context.Context, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "gh", args...)
 	cmd.Env = append(os.Environ(), c.Env...)
+	if c.Auth != nil {
+		env, err := c.Auth(ctx)
+		if err != nil {
+			return nil, err
+		}
+		cmd.Env = append(cmd.Env, env...)
+	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

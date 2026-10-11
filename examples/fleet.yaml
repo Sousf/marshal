@@ -28,6 +28,7 @@ defaults:
     - "Bash(git ls-remote:*)"
     - "Bash(gh api:*)"
     - "Bash(gh run:*)"
+    - "Bash(gh repo view:*)"
     - "Bash(cat:*)"
     - "Bash(ls:*)"
     - "Bash(grep:*)"
@@ -46,14 +47,26 @@ defaults:
     email: marshal@users.noreply.github.com
 
 repos:
+  - name: marshal
+    url: git@github.com:Sousf/marshal.git
+    jobs: [onboard, posture-audit, vuln-fix, ci-fix]
   - name: spotify-tui
     url: git@github.com:Sousf/spotify-tui.git
-    jobs: [posture-audit, vuln-fix, ci-fix]
+    jobs: [onboard, posture-audit, vuln-fix, ci-fix]
   - name: system-patch
     url: git@github.com:Sousf/system-patch.git
-    jobs: [posture-audit, vuln-fix, ci-fix]
+    jobs: [onboard, posture-audit, vuln-fix, ci-fix]
 
 jobs:
+  - name: onboard
+    description: add CI on pull requests, dependabot, and AGENTS.md where missing
+    schedule: manual
+    class: hardening
+    paths:
+      - ".github/workflows/ci.yml"
+      - ".github/dependabot.yml"
+      - "AGENTS.md"
+    max_diff_lines: 300
   - name: posture-audit
     description: pin actions, tighten permissions, dependabot, govulncheck
     schedule: weekly
@@ -94,3 +107,13 @@ policy:
     max_turns: 25
     max_usd: 2.00
     always: false
+
+# Act as a GitHub App instead of your own gh login, so PRs and merges carry
+# the app's identity and branch protection can require your review of them.
+# Create the app at https://github.com/settings/apps/new (see README), install
+# it on the repos above, save its private key, then fill this in.
+# github_app:
+#   app_id: 123456
+#   installation_id: 7891011
+#   private_key_file: ~/.config/marshal/marshal-app.pem
+#   slug: marshal-sousf

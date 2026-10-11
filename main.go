@@ -24,6 +24,7 @@ import (
 	"github.com/Sousf/marshal/internal/api"
 	"github.com/Sousf/marshal/internal/config"
 	"github.com/Sousf/marshal/internal/daemon"
+	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
 	"github.com/Sousf/marshal/internal/run"
@@ -109,6 +110,19 @@ func app(args []string) error {
 	switch cmd {
 	case "check":
 		fmt.Printf("%s: ok (%d repos, %d jobs, %d classes)\n", config.Path(), len(fleet.Repos), len(fleet.Jobs), len(fleet.Policy.Classes))
+		app, err := auth(fleet)
+		switch {
+		case err != nil:
+			return err
+		case app == nil:
+			fmt.Println("identity: the host's gh login (no github_app configured)")
+		default:
+			fmt.Printf("identity: GitHub App %s, installation %d\n", app.Identity().Name, app.InstallationID)
+			if _, err := app.Token(ctx, ghapp.ReadOnly); err != nil {
+				return fmt.Errorf("github_app: could not mint a token: %w", err)
+			}
+			fmt.Println("identity: token minted ok")
+		}
 		return nil
 	case "repos":
 		return cmdRepos(fleet)
@@ -169,12 +183,16 @@ func cmdVerify(ctx context.Context, f *config.Fleet, args []string) error {
 	if r.PRURL == "" {
 		return fmt.Errorf("run %s has no pull request to verify", r.ID)
 	}
-	gh := github.Client{}
+	app, err := auth(f)
+	if err != nil {
+		return err
+	}
+	gh := ghClient(app)
 	pr, err := gh.ViewPR(ctx, r.PRURL)
 	if err != nil {
 		return err
 	}
-	v := &verifier.Verifier{Fleet: f, Adapter: runner.Claude{}, WorkRoot: filepath.Join(config.StateDir(), "work"), Log: os.Stdout}
+	v := &verifier.Verifier{Fleet: f, Adapter: runner.Claude{}, WorkRoot: filepath.Join(config.StateDir(), "work"), Log: os.Stdout, Auth: app}
 	res, err := v.Verify(ctx, r, pr)
 	if err != nil {
 		return err
@@ -198,6 +216,21 @@ func cmdVerify(ctx context.Context, f *config.Fleet, args []string) error {
 }
 
 func socketPath() string { return filepath.Join(config.StateDir(), "marshal.sock") }
+
+// auth loads the GitHub App when the fleet configures one. nil means act as
+// the host's gh login.
+func auth(f *config.Fleet) (*ghapp.App, error) {
+	return ghapp.Load(f.GitHubApp)
+}
+
+// ghClient is gh acting as the app when there is one.
+func ghClient(app *ghapp.App) github.Client {
+	c := github.Client{}
+	if app != nil {
+		c.Auth = func(ctx context.Context) ([]string, error) { return app.Env(ctx, ghapp.Full) }
+	}
+	return c
+}
 
 func client() api.Client { return api.Client{Path: socketPath()} }
 
@@ -225,7 +258,16 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	}
 	defer st.Close()
 	logger := log.New(os.Stderr, "", log.LstdFlags)
-	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: github.Client{}, Version: version, Tick: tick, Log: logger}
+	app, err := auth(f)
+	if err != nil {
+		return err
+	}
+	if app != nil {
+		logger.Printf("acting as GitHub App %s (installation %d)", app.Identity().Name, app.InstallationID)
+	} else {
+		logger.Printf("acting as the host's gh login; set github_app in the fleet file for a bot identity")
+	}
+	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app}
 	if !d.Adapter.Available() {
 		logger.Printf("warning: %s is not on PATH; scheduled runs will fail until it is", "claude")
 	}
@@ -428,7 +470,11 @@ func cmdRun(ctx context.Context, f *config.Fleet, args []string) error {
 		return err
 	}
 	defer st.Close()
-	x := &run.Executor{Fleet: f, Store: st, Adapter: runner.Claude{}}
+	app, err := auth(f)
+	if err != nil {
+		return err
+	}
+	x := &run.Executor{Fleet: f, Store: st, Adapter: runner.Claude{}, Auth: app}
 	rec, err := x.Execute(ctx, pos[0], pos[1], opts)
 	if err != nil {
 		return err

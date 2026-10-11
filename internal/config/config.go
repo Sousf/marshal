@@ -49,10 +49,28 @@ type Fleet struct {
 	Repos    []Repo   `yaml:"repos"`
 	Jobs     []Job    `yaml:"jobs"`
 	Policy   Policy   `yaml:"policy"`
+	// GitHubApp, when set, makes MARSHAL act as a GitHub App installation
+	// instead of the host user's gh login.
+	GitHubApp GitHubApp `yaml:"github_app"`
 
 	// dir is where the file was read from; relative prompt paths resolve
 	// against it.
 	dir string
+}
+
+// GitHubApp identifies an installed GitHub App. All three of app_id,
+// installation_id and private_key_file are required when any is set.
+type GitHubApp struct {
+	AppID          int64  `yaml:"app_id"`
+	InstallationID int64  `yaml:"installation_id"`
+	PrivateKeyFile string `yaml:"private_key_file"`
+	// Slug is the app's URL name, used for the bot commit identity.
+	Slug string `yaml:"slug"`
+}
+
+// Set reports whether an app is configured at all.
+func (g GitHubApp) Set() bool {
+	return g.AppID != 0 || g.InstallationID != 0 || g.PrivateKeyFile != ""
 }
 
 // Identity is the git author MARSHAL commits as. Left empty, commits inherit
@@ -295,6 +313,9 @@ func (f *Fleet) validate() error {
 		if !c.Start.Valid() {
 			errs = append(errs, fmt.Errorf("policy.classes.%s: start: unknown level %q", name, c.Start))
 		}
+	}
+	if g := f.GitHubApp; g.Set() && (g.AppID == 0 || g.InstallationID == 0 || g.PrivateKeyFile == "") {
+		errs = append(errs, errors.New("github_app: app_id, installation_id and private_key_file are all required"))
 	}
 	return errors.Join(errs...)
 }

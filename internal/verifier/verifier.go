@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
 	"github.com/Sousf/marshal/internal/runner"
@@ -81,6 +82,8 @@ type Verifier struct {
 	WorkRoot string
 	// Log receives one line per event. May be nil.
 	Log io.Writer
+	// Auth, when set, clones as the GitHub App with a read-only token.
+	Auth *ghapp.App
 }
 
 // allowed is the verifier's whole tool surface: read, search, test. No
@@ -112,8 +115,17 @@ func (v *Verifier) Verify(ctx context.Context, run store.Run, pr github.PR) (Res
 	if headRef == "" {
 		headRef = run.Branch
 	}
+	var env []string
+	if v.Auth != nil {
+		e, err := v.Auth.Env(ctx, ghapp.ReadOnly)
+		if err != nil {
+			return Result{}, err
+		}
+		env = e
+		repo.URL = ghapp.CloneURL(repo)
+	}
 	v.logf("verify %s: checking out %s @ %s", run.ID, headRef, short(pr.HeadSHA))
-	ws, err := workspace.PrepareHead(ctx, v.WorkRoot, repo, run.ID, headRef, pr.HeadSHA, nil)
+	ws, err := workspace.PrepareHead(ctx, v.WorkRoot, repo, run.ID, headRef, pr.HeadSHA, env)
 	if err != nil {
 		return Result{}, err
 	}
@@ -152,6 +164,7 @@ func (v *Verifier) Verify(ctx context.Context, run store.Run, pr github.PR) (Res
 		AllowedTools:    allowed,
 		DisallowedTools: disallowed,
 		JSONSchema:      Schema,
+		Env:             env,
 	}
 	res, err := v.Adapter.Run(ctx, req, func(e runner.Event) {
 		if e.Kind == runner.Tool || e.Kind == runner.Denied || e.Kind == runner.Note {

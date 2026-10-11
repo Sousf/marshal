@@ -109,6 +109,54 @@ Set `policy.verifier.always: true` to have every proposal verified and
 commented, whatever its trust level. It costs a verifier run per PR and
 makes your own review a read of the findings rather than of the diff.
 
+### Adding a repository
+
+Add an entry under `repos:` in the fleet file and run `marshal check`.
+`name` is what you type everywhere else; `url` is what git clones; `jobs`
+is which jobs may run against it. `branch` is only needed when the PR base
+is not the remote's default branch, `github: owner/repo` only when the slug
+cannot be read off the url. A new repo starts every class at `review`.
+
+If the repo has no CI, Dependabot or `AGENTS.md`, the `onboard` job adds
+what is missing and reports the branch protection settings to turn on:
+
+```sh
+marshal run onboard <repo>
+```
+
+Branch protection on the default branch, requiring a PR, is what makes
+"the agent cannot push to main" true at GitHub's end as well as MARSHAL's.
+Autonomy needs CI checks on PRs; without them nothing merges itself.
+
+### Acting as a GitHub App
+
+Without an app, MARSHAL uses your own `gh` login: its PRs look like yours
+and branch protection cannot require you to review them. With an app, PRs
+and merges come from `<slug>[bot]`, the agent gets a one-hour read-only
+token, and the harness holds the one that writes.
+
+Creating the app is a form at <https://github.com/settings/apps/new>. It
+cannot be done from the command line. Settings:
+
+| field | value |
+|---|---|
+| Name | something unique, e.g. `marshal-<yourname>`; this becomes the slug |
+| Homepage URL | the MARSHAL repo |
+| Webhook | untick *Active* |
+| Repository permissions | Contents: read and write · Pull requests: read and write · Issues: read and write (labels) · Workflows: read and write (to add `ci.yml`) · Actions: read · Checks: read · Metadata: read |
+| Where can it be installed | only on this account |
+
+After *Create GitHub App*: note the **App ID**, click *Generate a private
+key* and save the `.pem` as `~/.config/marshal/marshal-app.pem` with mode
+600, then *Install App* on the repos in the fleet. The number at the end of
+the URL you land on (`/settings/installations/<id>`) is the **installation
+ID**. Fill in the `github_app` block in the fleet file and run
+`marshal check`, which mints a token to prove it works.
+
+For auto-merge under branch protection that requires reviews, add the app
+to the rule's bypass list. Everything else still applies: the ladder, the
+verifier, CI green, the caps.
+
 ### Trying autonomy safely
 
 Autonomy only acts on PRs MARSHAL opened, only when the PR has CI checks and
