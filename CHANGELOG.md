@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.3 (2026-10-11)
+
+- Operator requests skip the PR cap; refusals reach the interface
+- Drop c (chat) from the interface
+
 ## v0.1.2 (2026-10-11)
 
 - O opens every pull request waiting on you
