@@ -22,6 +22,7 @@ type Source interface {
 	Run(ctx context.Context, id string) (store.Run, error)
 	EventsAfter(ctx context.Context, id string, after int64) ([]store.Event, error)
 	Trust(ctx context.Context) ([]store.Trust, error)
+	Verdict(ctx context.Context, runID string) (store.Verdict, bool, error)
 	Trigger(ctx context.Context, job, repo string) (string, error)
 	SetAutonomy(ctx context.Context, on bool) error
 }
@@ -66,6 +67,14 @@ func (d Daemon) EventsAfter(ctx context.Context, id string, after int64) ([]stor
 func (d Daemon) Trust(ctx context.Context) ([]store.Trust, error) {
 	r, err := d.do(ctx, api.Request{Op: "trust"})
 	return r.Trust, err
+}
+
+func (d Daemon) Verdict(ctx context.Context, runID string) (store.Verdict, bool, error) {
+	r, err := d.do(ctx, api.Request{Op: "verdict", ID: runID})
+	if err != nil || r.Verdict == nil {
+		return store.Verdict{}, false, err
+	}
+	return *r.Verdict, true, nil
 }
 
 func (d Daemon) Trigger(ctx context.Context, job, repo string) (string, error) {
@@ -116,6 +125,10 @@ func (l Local) Trust(ctx context.Context) ([]store.Trust, error) {
 		return nil, err
 	}
 	return daemon.Ladder(l.Fleet, rec), nil
+}
+
+func (l Local) Verdict(ctx context.Context, runID string) (store.Verdict, bool, error) {
+	return l.Store.LatestVerdict(ctx, runID)
 }
 
 func (l Local) Trigger(context.Context, string, string) (string, error) {

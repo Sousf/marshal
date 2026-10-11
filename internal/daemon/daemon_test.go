@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,10 +20,12 @@ import (
 )
 
 type fakeGH struct {
-	mu     sync.Mutex
-	prs    map[string]github.PR
-	merged []string
-	ci     github.CI
+	mu       sync.Mutex
+	prs      map[string]github.PR
+	merged   []string
+	comments []string
+	labels   []string
+	ci       github.CI
 }
 
 func (g *fakeGH) ViewPR(_ context.Context, url string) (github.PR, error) {
@@ -39,23 +42,42 @@ func (g *fakeGH) MergePR(_ context.Context, url string) error {
 	g.prs[url] = p
 	return nil
 }
-func (g *fakeGH) CommentPR(context.Context, string, string) error { return nil }
+func (g *fakeGH) CommentPR(_ context.Context, url, body string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.comments = append(g.comments, url+": "+body)
+	return nil
+}
+func (g *fakeGH) AddLabel(_ context.Context, url, label string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.labels = append(g.labels, url+": "+label)
+	return nil
+}
 func (g *fakeGH) LatestCI(context.Context, string, string) (github.CI, bool, error) {
 	return g.ci, true, nil
 }
 func (g *fakeGH) DefaultBranch(context.Context, string) (string, error) { return "main", nil }
 
 type fakeAdapter struct {
-	mu    sync.Mutex
-	calls int
+	mu      sync.Mutex
+	calls   int
+	verdict string // what the verifier run answers; empty means no structured answer
 }
 
 func (*fakeAdapter) Name() string    { return "fake" }
 func (*fakeAdapter) Available() bool { return true }
 func (f *fakeAdapter) Run(_ context.Context, req runner.Request, emit func(runner.Event)) (runner.Result, error) {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	if req.JSONSchema != "" {
+		r := runner.Result{Turns: 2, CostUSD: 0.05}
+		if f.verdict != "" {
+			r.Structured = []byte(`{"verdict":"` + f.verdict + `","summary":"scripted","findings":[],"tests_ran":true,"tests_passed":true}`)
+		}
+		return r, nil
+	}
 	f.calls++
-	f.mu.Unlock()
 	return runner.Result{Output: "NO CHANGE: fine", Turns: 1, CostUSD: 0.01}, nil
 }
 
@@ -77,13 +99,46 @@ func origin(t *testing.T) string {
 	return dir
 }
 
+// branch creates a proposal branch with one commit in the origin and
+// returns its head SHA.
+func branch(t *testing.T, dir, name string) string {
+	t.Helper()
+	git := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("checkout", "-q", "-b", name)
+	file := strings.ReplaceAll(name, "/", "-") + ".txt"
+	if err := os.WriteFile(filepath.Join(dir, file), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", name)
+	sha := git("rev-parse", "HEAD")
+	git("checkout", "-q", "main")
+	return sha
+}
+
 func newDaemon(t *testing.T, gh *fakeGH) (*Daemon, *fakeAdapter) {
 	t.Helper()
+	d, a, _ := newDaemonDir(t, gh)
+	return d, a
+}
+
+func newDaemonDir(t *testing.T, gh *fakeGH) (*Daemon, *fakeAdapter, string) {
+	t.Helper()
+	dir := origin(t)
 	f, err := config.Parse([]byte(`
 version: 1
 defaults: {model: m, max_turns: 3, max_usd: 1}
 repos:
-  - {name: x, url: ` + origin(t) + `, github: Sousf/x, jobs: [audit, fix]}
+  - {name: x, url: ` + dir + `, github: Sousf/x, jobs: [audit, fix]}
 jobs:
   - {name: audit, class: hardening, schedule: daily, prompt: p}
   - {name: fix, class: code, schedule: on-failure, prompt: p}
@@ -101,24 +156,70 @@ policy:
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	a := &fakeAdapter{}
+	a := &fakeAdapter{verdict: "PASS"}
 	d := &Daemon{Fleet: f, Store: st, Adapter: a, GH: gh, Version: "t", WorkRoot: t.TempDir(),
 		Log: log.New(io.Discard, "", 0)}
 	d.init()
-	return d, a
+	return d, a, dir
 }
 
+// proposal records a proposed run. When dir is non-empty a real branch is
+// created in the origin so the verifier has something to check out, and the
+// fake PR learns its head SHA.
 func proposal(t *testing.T, d *Daemon, class, url string, started time.Time) store.Run {
+	return proposalIn(t, d, nil, "", class, url, started)
+}
+
+func proposalIn(t *testing.T, d *Daemon, gh *fakeGH, dir, class, url string, started time.Time) store.Run {
 	t.Helper()
 	r := &store.Run{Job: "audit", Repo: "x", Class: class, Status: store.Proposed, StartedAt: started}
 	if err := d.Store.CreateRun(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
 	r.PRURL = url
+	r.Branch = "marshal/audit/" + r.ID
+	if dir != "" {
+		sha := branch(t, dir, r.Branch)
+		gh.mu.Lock()
+		p := gh.prs[url]
+		p.HeadRef = r.Branch
+		p.HeadSHA = sha
+		gh.prs[url] = p
+		gh.mu.Unlock()
+	}
 	if err := d.Store.UpdateRun(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
 	return *r
+}
+
+// settle runs sync until no verification is in flight, then once more so a
+// fresh verdict is acted on.
+func settle(t *testing.T, d *Daemon) {
+	t.Helper()
+	for i := 0; i < 3; i++ {
+		if err := d.syncProposals(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		waitVerify(t, d)
+	}
+}
+
+func waitVerify(t *testing.T, d *Daemon) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		d.mu.Lock()
+		n := len(d.verifying)
+		d.mu.Unlock()
+		if n == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("verification did not finish")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func level(t *testing.T, d *Daemon, class string) string {
@@ -175,7 +276,7 @@ func TestAutoMergeGates(t *testing.T) {
 		return github.PR{State: "OPEN", Checks: checks, Review: review, Labels: labels}
 	}
 	gh := &fakeGH{prs: map[string]github.PR{}}
-	d, _ := newDaemon(t, gh)
+	d, _, dir := newDaemonDir(t, gh)
 	// Put hardening at auto directly.
 	d.Store.PutTrust(ctx, store.Trust{Repo: "x", Class: "hardening", Level: "auto"})
 
@@ -195,12 +296,10 @@ func TestAutoMergeGates(t *testing.T) {
 		gh.merged = nil
 		url := "pr-" + c.name
 		gh.prs[url] = c.pr
-		proposal(t, d, "hardening", url, time.Now())
+		proposalIn(t, d, gh, dir, "hardening", url, time.Now())
 		// Reset the daily cap between cases by pretending nothing merged today.
 		d.Fleet.Policy.Caps.AutoMergesPerRepoPerDay = 0
-		if err := d.syncProposals(ctx); err != nil {
-			t.Fatal(err)
-		}
+		settle(t, d)
 		got := len(gh.merged) == 1
 		if got != c.want {
 			t.Errorf("%s: merged=%v want %v", c.name, got, c.want)
@@ -214,6 +313,87 @@ func TestAutoMergeGates(t *testing.T) {
 	if len(merged) != 1 || merged[0].MergedBy != "auto" {
 		t.Errorf("merged_by should be auto: %+v", merged)
 	}
+	// The green case was verified exactly once and the verdict was posted.
+	v, ok, _ := d.Store.LatestVerdict(ctx, merged[0].ID)
+	if !ok || v.Verdict != "PASS" || v.Head != gh.prs["pr-green"].HeadSHA {
+		t.Errorf("verdict = %+v ok=%v", v, ok)
+	}
+	n := 0
+	for _, c := range gh.comments {
+		if strings.Contains(c, "MARSHAL verifier: PASS") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("verifier comments = %d, want 1:\n%s", n, strings.Join(gh.comments, "\n"))
+	}
+}
+
+func TestVerifierBlocksAutoMerge(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "SUCCESS"}}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.verdict = "FAIL"
+	d.Store.PutTrust(ctx, store.Trust{Repo: "x", Class: "hardening", Level: "auto"})
+	r := proposalIn(t, d, gh, dir, "hardening", "u", time.Now())
+	settle(t, d)
+	if len(gh.merged) != 0 {
+		t.Fatal("a FAIL verdict must block the merge")
+	}
+	if len(gh.labels) != 1 || !strings.Contains(gh.labels[0], "needs-human") {
+		t.Errorf("labels = %v", gh.labels)
+	}
+	v, _, _ := d.Store.LatestVerdict(ctx, r.ID)
+	if v.Verdict != "FAIL" {
+		t.Errorf("%+v", v)
+	}
+	// A new head re-verifies; same head does not.
+	settle(t, d)
+	if n := strings.Count(strings.Join(gh.comments, "\n"), "MARSHAL verifier"); n != 1 {
+		t.Errorf("same head verified %d times", n)
+	}
+	a.verdict = "PASS"
+	gh.mu.Lock()
+	p := gh.prs["u"]
+	p.HeadSHA = branch(t, dir, "marshal/audit/"+r.ID+"-v2")
+	p.HeadRef = "marshal/audit/" + r.ID + "-v2"
+	gh.prs["u"] = p
+	gh.mu.Unlock()
+	settle(t, d)
+	if len(gh.merged) != 1 {
+		t.Error("a new, passing head should merge")
+	}
+
+	// No structured answer at all is UNSURE, which also holds.
+	gh2 := &fakeGH{prs: map[string]github.PR{"w": {State: "OPEN", Checks: "SUCCESS"}}}
+	d2, a2, dir2 := newDaemonDir(t, gh2)
+	a2.verdict = ""
+	d2.Store.PutTrust(ctx, store.Trust{Repo: "x", Class: "hardening", Level: "auto"})
+	r2 := proposalIn(t, d2, gh2, dir2, "hardening", "w", time.Now())
+	settle(t, d2)
+	v2, _, _ := d2.Store.LatestVerdict(ctx, r2.ID)
+	if len(gh2.merged) != 0 || v2.Verdict != "UNSURE" {
+		t.Errorf("merged=%v verdict=%+v", gh2.merged, v2)
+	}
+}
+
+func TestVerifierAlwaysOnReviewPRs(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "SUCCESS"}}}
+	d, _, dir := newDaemonDir(t, gh)
+	// Class stays at review, autonomy is off: nothing may merge, but with
+	// always on the verifier still comments.
+	d.Store.SetSetting(ctx, autonomyKey, "off")
+	proposalIn(t, d, gh, dir, "hardening", "u", time.Now())
+	settle(t, d)
+	if len(gh.comments) != 0 {
+		t.Fatal("without always, a review-level PR is not verified")
+	}
+	d.Fleet.Policy.Verifier.Always = true
+	settle(t, d)
+	if len(gh.comments) != 1 || len(gh.merged) != 0 {
+		t.Errorf("comments=%d merged=%d", len(gh.comments), len(gh.merged))
+	}
 }
 
 func TestSoakAndKillSwitchAndCap(t *testing.T) {
@@ -223,19 +403,19 @@ func TestSoakAndKillSwitchAndCap(t *testing.T) {
 		"old":   {State: "OPEN", Checks: "SUCCESS"},
 		"old2":  {State: "OPEN", Checks: "SUCCESS"},
 	}}
-	d, _ := newDaemon(t, gh)
+	d, _, dir := newDaemonDir(t, gh)
 	d.Store.PutTrust(ctx, store.Trust{Repo: "x", Class: "hardening", Level: "soak"})
-	proposal(t, d, "hardening", "fresh", time.Now())
-	proposal(t, d, "hardening", "old", time.Now().Add(-25*time.Hour))
-	proposal(t, d, "hardening", "old2", time.Now().Add(-26*time.Hour))
+	proposalIn(t, d, gh, dir, "hardening", "fresh", time.Now())
+	proposalIn(t, d, gh, dir, "hardening", "old", time.Now().Add(-25*time.Hour))
+	proposalIn(t, d, gh, dir, "hardening", "old2", time.Now().Add(-26*time.Hour))
 
 	d.Store.SetSetting(ctx, autonomyKey, "off")
-	d.syncProposals(ctx)
+	settle(t, d)
 	if len(gh.merged) != 0 {
 		t.Fatal("kill switch off must stop every merge")
 	}
 	d.Store.SetSetting(ctx, autonomyKey, "on")
-	d.syncProposals(ctx)
+	settle(t, d)
 	if len(gh.merged) != 1 {
 		t.Fatalf("exactly one soaked PR should merge under cap 1: %v", gh.merged)
 	}
@@ -246,7 +426,7 @@ func TestSoakAndKillSwitchAndCap(t *testing.T) {
 	if runs[0].MergedBy != "soak" {
 		t.Errorf("merged_by = %q", runs[0].MergedBy)
 	}
-	d.syncProposals(ctx)
+	settle(t, d)
 	if len(gh.merged) != 1 {
 		t.Error("cap of one auto merge per day should hold the second")
 	}

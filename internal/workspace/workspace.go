@@ -69,6 +69,78 @@ func Prepare(ctx context.Context, root string, repo config.Repo, job, runID stri
 	return w, nil
 }
 
+// PrepareHead clones repo and checks out a proposal's head commit, for the
+// verifier. The base branch is fetched too so the diff can be taken against
+// the exact point the proposal branched from. Nothing here is ever pushed.
+func PrepareHead(ctx context.Context, root string, repo config.Repo, runID, headRef, headSHA string, env []string) (*Workspace, error) {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp(root, "verify-"+runID+"-")
+	if err != nil {
+		return nil, err
+	}
+	w := &Workspace{Dir: dir, Repo: repo, Env: env, Branch: headRef}
+	args := []string{"clone", "--quiet"}
+	if repo.Branch != "" {
+		args = append(args, "--branch", repo.Branch)
+	}
+	if _, err := w.gitIn(ctx, root, append(args, repo.URL, dir)...); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("clone %s: %w", repo.URL, err)
+	}
+	if w.Repo.Branch == "" {
+		head, err := w.git(ctx, "symbolic-ref", "--short", "HEAD")
+		if err != nil {
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("%s: cannot determine default branch: %w", repo.URL, err)
+		}
+		w.Repo.Branch = strings.TrimSpace(head)
+	}
+	if _, err := w.git(ctx, "fetch", "--quiet", "origin", headRef); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("fetch %s: %w", headRef, err)
+	}
+	target := headSHA
+	if target == "" {
+		target = "FETCH_HEAD"
+	}
+	if _, err := w.git(ctx, "checkout", "--quiet", "--detach", target); err != nil {
+		os.RemoveAll(dir)
+		return nil, fmt.Errorf("checkout %s: %w", target, err)
+	}
+	return w, nil
+}
+
+// HeadSHA returns the checked-out commit.
+func (w *Workspace) HeadSHA(ctx context.Context) (string, error) {
+	out, err := w.git(ctx, "rev-parse", "HEAD")
+	return strings.TrimSpace(out), err
+}
+
+// Base is the ref the proposal is compared against.
+func (w *Workspace) Base() string { return "origin/" + w.Repo.Branch }
+
+// DiffNumstat is `git diff --numstat base...HEAD`.
+func (w *Workspace) DiffNumstat(ctx context.Context) (string, error) {
+	return w.git(ctx, "diff", "--numstat", w.Base()+"...HEAD")
+}
+
+// DiffPatch is the full textual diff from the merge base to HEAD.
+func (w *Workspace) DiffPatch(ctx context.Context) (string, error) {
+	return w.git(ctx, "diff", "--no-color", "--no-ext-diff", w.Base()+"...HEAD")
+}
+
+// FileAt returns a file's contents at a revision; empty if it does not
+// exist there.
+func (w *Workspace) FileAt(ctx context.Context, rev, path string) string {
+	out, err := w.git(ctx, "show", rev+":"+path)
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
 // BranchName is marshal/<job>/<run>, so a glance at the branch list says
 // what made it and the run record is one lookup away.
 func BranchName(job, runID string) string {

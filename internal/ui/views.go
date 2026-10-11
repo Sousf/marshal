@@ -47,6 +47,13 @@ func (m Model) View() string {
 	return out + "\n" + m.footer()
 }
 
+func short(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
+
 func versionLabel(v string) string {
 	if v == "" || v == "dev" {
 		return "dev build"
@@ -294,6 +301,19 @@ func (m Model) renderDetail() string {
 	}
 	if r.Error != "" {
 		b.WriteString(" " + sBad.Render(strings.ReplaceAll(r.Error, "\n", "\n ")) + "\n")
+	}
+	if v := m.verdict; v != nil {
+		style, icon := sWarn, "⚠"
+		switch v.Verdict {
+		case "PASS":
+			style, icon = sGood, "✓"
+		case "FAIL":
+			style, icon = sBad, "✗"
+		}
+		b.WriteString(fmt.Sprintf(" %s %s  %s\n", sDim.Render("verifier"), style.Render(icon+" "+v.Verdict), sDim.Render(fmt.Sprintf("head %s · %d turns · $%.2f", short(v.Head), v.Turns, v.CostUSD))))
+		if v.Summary != "" {
+			b.WriteString("          " + strings.ReplaceAll(v.Summary, "\n", "\n          ") + "\n")
+		}
 	}
 	b.WriteString(" " + sRule.Render(strings.Repeat("─", max(m.width-4, 10))) + "\n")
 	for _, e := range m.events {

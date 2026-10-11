@@ -76,6 +76,9 @@ func (c Claude) Args(req Request) []string {
 	if req.SystemPrompt != "" {
 		args = append(args, "--append-system-prompt", req.SystemPrompt)
 	}
+	if req.JSONSchema != "" {
+		args = append(args, "--json-schema", req.JSONSchema)
+	}
 	return args
 }
 
@@ -136,13 +139,14 @@ type event struct {
 		} `json:"content"`
 	} `json:"message"`
 	// result fields
-	Result            string  `json:"result"`
-	IsError           bool    `json:"is_error"`
-	CostUSD           float64 `json:"total_cost_usd"`
-	NumTurns          int     `json:"num_turns"`
-	DurationMS        int64   `json:"duration_ms"`
-	SessionID         string  `json:"session_id"`
-	TerminalReason    string  `json:"terminal_reason"`
+	Result            string          `json:"result"`
+	IsError           bool            `json:"is_error"`
+	CostUSD           float64         `json:"total_cost_usd"`
+	NumTurns          int             `json:"num_turns"`
+	DurationMS        int64           `json:"duration_ms"`
+	SessionID         string          `json:"session_id"`
+	TerminalReason    string          `json:"terminal_reason"`
+	Structured        json.RawMessage `json:"structured_output"`
 	PermissionDenials []struct {
 		ToolName  string          `json:"tool_name"`
 		ToolInput json.RawMessage `json:"tool_input"`
@@ -193,6 +197,9 @@ func ParseStream(r io.Reader, emit func(Event)) (Result, error) {
 			}
 			if e.IsError && e.Result != "" {
 				res.Output = e.Result
+			}
+			if len(e.Structured) > 0 && string(e.Structured) != "null" {
+				res.Structured = e.Structured
 			}
 			for _, d := range e.PermissionDenials {
 				what := Summarise(d.ToolName, d.ToolInput)
@@ -269,7 +276,7 @@ func Summarise(name string, input json.RawMessage) string {
 func shortArgs(args []string) string {
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--append-system-prompt" && i+1 < len(args) {
+		if (args[i] == "--append-system-prompt" || args[i] == "--json-schema") && i+1 < len(args) {
 			out = append(out, args[i], fmt.Sprintf("<%d bytes>", len(args[i+1])))
 			i++
 			continue

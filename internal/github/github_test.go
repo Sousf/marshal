@@ -7,10 +7,11 @@ import (
 
 func TestSlug(t *testing.T) {
 	for in, want := range map[string]string{
-		"git@github.com:Sousf/spotify-tui.git": "Sousf/spotify-tui",
-		"https://github.com/Sousf/marshal":     "Sousf/marshal",
-		"https://github.com/Sousf/marshal.git": "Sousf/marshal",
-		"https://github.com/Sousf/marshal/":    "Sousf/marshal",
+		"git@github.com:Sousf/spotify-tui.git":     "Sousf/spotify-tui",
+		"https://github.com/Sousf/marshal":         "Sousf/marshal",
+		"https://github.com/Sousf/marshal.git":     "Sousf/marshal",
+		"https://github.com/Sousf/marshal/":        "Sousf/marshal",
+		"https://github.com/Sousf/marshal/pull/12": "Sousf/marshal",
 	} {
 		got, ok := Slug(in)
 		if !ok || got != want {

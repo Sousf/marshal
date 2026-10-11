@@ -120,10 +120,51 @@ type Job struct {
 	MaxDiffLines int `yaml:"max_diff_lines"`
 }
 
-// Policy is the trust ladder.
+// Policy is the trust ladder and the verifier.
 type Policy struct {
-	Classes map[string]Class `yaml:"classes"`
-	Caps    Caps             `yaml:"caps"`
+	Classes  map[string]Class `yaml:"classes"`
+	Caps     Caps             `yaml:"caps"`
+	Verifier Verifier         `yaml:"verifier"`
+}
+
+// Verifier configures the second agent that reads a proposal's diff before
+// MARSHAL merges it on its own.
+type Verifier struct {
+	// Model defaults to the fleet default; a different family from the
+	// proposer is a reasonable choice and costs nothing to configure.
+	Model    string  `yaml:"model"`
+	Effort   string  `yaml:"effort"`
+	MaxTurns int     `yaml:"max_turns"`
+	MaxUSD   float64 `yaml:"max_usd"`
+	// Always runs the verifier on every proposal, not only the ones about to
+	// merge autonomously, and posts its findings as a PR comment to make the
+	// human review faster. Costs a run per PR.
+	Always bool `yaml:"always"`
+	// MaxDiffBytes caps how much patch text is put in front of the verifier.
+	// Beyond it the diff is summarised by file and the verdict is UNSURE
+	// unless the agent reads the files itself. Zero means 200 KB.
+	MaxDiffBytes int `yaml:"max_diff_bytes"`
+}
+
+// ResolveVerifier folds defaults into the verifier settings.
+func (f *Fleet) ResolveVerifier() Verifier {
+	v := f.Policy.Verifier
+	if v.Model == "" {
+		v.Model = f.Defaults.Model
+	}
+	if v.Effort == "" {
+		v.Effort = f.Defaults.Effort
+	}
+	if v.MaxTurns == 0 {
+		v.MaxTurns = 25
+	}
+	if v.MaxUSD == 0 {
+		v.MaxUSD = 2
+	}
+	if v.MaxDiffBytes == 0 {
+		v.MaxDiffBytes = 200 * 1024
+	}
+	return v
 }
 
 // Class says where a kind of change starts on the ladder and how it moves.

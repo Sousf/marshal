@@ -68,6 +68,21 @@ type Event struct {
 	Text string
 }
 
+// Verdict is what the verifier said about one head of a proposal.
+type Verdict struct {
+	RunID string
+	// Head is the commit the verdict is about. A new push invalidates it.
+	Head string
+	// Verdict is PASS, FAIL or UNSURE. Only PASS allows an autonomous merge.
+	Verdict string
+	Summary string
+	// Findings is the verifier's structured findings as JSON, kept verbatim.
+	Findings string
+	Turns    int
+	CostUSD  float64
+	At       time.Time
+}
+
 // Trust is where a class sits on the ladder for one repo.
 type Trust struct {
 	Repo, Class string
@@ -125,6 +140,18 @@ CREATE TABLE IF NOT EXISTS runs (
 	error TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS runs_repo ON runs(repo, started_at);
+CREATE TABLE IF NOT EXISTS verdicts (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+	head TEXT NOT NULL,
+	verdict TEXT NOT NULL,
+	summary TEXT NOT NULL DEFAULT '',
+	findings TEXT NOT NULL DEFAULT '',
+	turns INTEGER NOT NULL DEFAULT 0,
+	cost_usd REAL NOT NULL DEFAULT 0,
+	at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS verdicts_run ON verdicts(run_id, id);
 CREATE TABLE IF NOT EXISTS settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -366,6 +393,41 @@ func (s *Store) EventsAfter(ctx context.Context, runID string, after int64) ([]E
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// PutVerdict records a verdict.
+func (s *Store) PutVerdict(ctx context.Context, v Verdict) error {
+	if v.At.IsZero() {
+		v.At = time.Now()
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO verdicts (run_id, head, verdict, summary, findings, turns, cost_usd, at)
+		VALUES (?,?,?,?,?,?,?,?)`, v.RunID, v.Head, v.Verdict, v.Summary, v.Findings, v.Turns, v.CostUSD, v.At.Unix())
+	return err
+}
+
+// LatestVerdict returns the most recent verdict for a run, and whether one
+// exists.
+func (s *Store) LatestVerdict(ctx context.Context, runID string) (Verdict, bool, error) {
+	var v Verdict
+	var at int64
+	err := s.db.QueryRowContext(ctx, `SELECT run_id, head, verdict, summary, findings, turns, cost_usd, at
+		FROM verdicts WHERE run_id=? ORDER BY id DESC LIMIT 1`, runID).
+		Scan(&v.RunID, &v.Head, &v.Verdict, &v.Summary, &v.Findings, &v.Turns, &v.CostUSD, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Verdict{}, false, nil
+	}
+	if err != nil {
+		return Verdict{}, false, err
+	}
+	v.At = time.Unix(at, 0)
+	return v, true, nil
+}
+
+// VerdictSpendSince totals verifier cost after t, for the daily cap.
+func (s *Store) VerdictSpendSince(ctx context.Context, since time.Time) (float64, error) {
+	var usd sql.NullFloat64
+	err := s.db.QueryRowContext(ctx, `SELECT SUM(cost_usd) FROM verdicts WHERE at>=?`, since.Unix()).Scan(&usd)
+	return usd.Float64, err
 }
 
 // Setting reads a key from the settings table; def when unset.

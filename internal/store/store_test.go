@@ -119,6 +119,25 @@ func TestStatusQueriesAndSettings(t *testing.T) {
 	}
 }
 
+func TestVerdicts(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	r := &Run{Job: "j", Repo: "r", Status: Proposed}
+	s.CreateRun(ctx, r)
+	if _, ok, err := s.LatestVerdict(ctx, r.ID); ok || err != nil {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	s.PutVerdict(ctx, Verdict{RunID: r.ID, Head: "aaa", Verdict: "FAIL", Summary: "bad", CostUSD: 0.5})
+	s.PutVerdict(ctx, Verdict{RunID: r.ID, Head: "bbb", Verdict: "PASS", Summary: "good", Findings: `[]`, CostUSD: 0.25})
+	v, ok, err := s.LatestVerdict(ctx, r.ID)
+	if err != nil || !ok || v.Head != "bbb" || v.Verdict != "PASS" || v.At.IsZero() {
+		t.Errorf("%+v %v %v", v, ok, err)
+	}
+	if usd, _ := s.VerdictSpendSince(ctx, time.Now().Add(-time.Hour)); usd != 0.75 {
+		t.Errorf("spend = %v", usd)
+	}
+}
+
 func TestTrust(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()

@@ -8,7 +8,8 @@ package per concern: `config` (fleet file), `runner` (agent adapters),
 `store` (SQLite), `workspace` (git and PRs), `policy` (diff checks and the
 trust ladder), `run` (one job end to end), `jobs` (embedded briefs),
 `sched` (schedule strings), `github` (gh wrapper), `api` (Unix socket
-protocol), `daemon` (scheduler, PR sync, auto-merge), `ui` (Bubble Tea).
+protocol), `daemon` (scheduler, PR sync, auto-merge), `verifier` (the
+second agent and its deterministic checks), `ui` (Bubble Tea).
 
 Rules the code enforces, which no change may weaken:
 
@@ -24,6 +25,9 @@ Rules the code enforces, which no change may weaken:
 - Auto-merge requires CI checks to exist and pass. A repo without CI gets no
   autonomy, whatever its level.
 - The daemon listens on a Unix socket only.
+- No autonomous merge without a PASS verdict bound to the PR's current head.
+  The verifier gets read-only tools and never the proposer's transcript.
+  `verifier.Checks.Fatal` outranks the model's answer.
 
 Tests: `go test ./...` must pass with no network and no `claude` binary.
 Anything that talks to an agent goes through `runner.Adapter` so tests can

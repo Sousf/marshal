@@ -54,6 +54,19 @@ func TestParseAndResolve(t *testing.T) {
 	}
 }
 
+func TestResolveVerifier(t *testing.T) {
+	f, _ := Parse([]byte(good))
+	v := f.ResolveVerifier()
+	if v.Model != "m" || v.MaxTurns != 25 || v.MaxUSD != 2 || v.MaxDiffBytes == 0 || v.Always {
+		t.Errorf("%+v", v)
+	}
+	f.Policy.Verifier.Model = "other"
+	f.Policy.Verifier.Always = true
+	if v := f.ResolveVerifier(); v.Model != "other" || !v.Always {
+		t.Errorf("%+v", v)
+	}
+}
+
 func TestPromptSources(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "brief.md"), []byte("from file"), 0o644)

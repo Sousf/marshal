@@ -22,7 +22,7 @@ import (
 
 // Request is one call to the daemon.
 type Request struct {
-	// Op is one of: status, runs, run, events, trigger, autonomy, trust.
+	// Op is one of: status, runs, run, events, trigger, autonomy, trust, verdict.
 	Op    string `json:"op"`
 	Repo  string `json:"repo,omitempty"`
 	Job   string `json:"job,omitempty"`
@@ -38,7 +38,8 @@ type Status struct {
 	Version   string    `json:"version"`
 	Started   time.Time `json:"started"`
 	Autonomy  bool      `json:"autonomy"`
-	Running   []string  `json:"running"` // run IDs in flight
+	Running   []string  `json:"running"`   // run IDs in flight
+	Verifying []string  `json:"verifying"` // run IDs being verified
 	Repos     int       `json:"repos"`
 	Jobs      int       `json:"jobs"`
 	Spend24h  float64   `json:"spend_24h"`
@@ -55,6 +56,8 @@ type Response struct {
 	Run    *store.Run    `json:"run,omitempty"`
 	Events []store.Event `json:"events,omitempty"`
 	Trust  []store.Trust `json:"trust,omitempty"`
+	// Verdict is the latest verifier verdict for a run, when one exists.
+	Verdict *store.Verdict `json:"verdict,omitempty"`
 	// ID is the run started by trigger.
 	ID string `json:"id,omitempty"`
 }

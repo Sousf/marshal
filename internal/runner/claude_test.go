@@ -53,6 +53,24 @@ func TestParseStreamNoResult(t *testing.T) {
 	}
 }
 
+func TestParseStreamStructured(t *testing.T) {
+	line := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"structured_output":{"verdict":"PASS","reason":"ok"},"result":"{\"verdict\":\"PASS\"}"}` + "\n"
+	res, err := ParseStream(strings.NewReader(line), func(Event) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(res.Structured) != `{"verdict":"PASS","reason":"ok"}` {
+		t.Errorf("structured = %s", res.Structured)
+	}
+	args := Claude{}.Args(Request{JSONSchema: `{"type":"object"}`})
+	if !strings.Contains(strings.Join(args, " "), `--json-schema {"type":"object"}`) {
+		t.Errorf("schema flag missing: %v", args)
+	}
+	if strings.Contains(shortArgs(args), `"type"`) {
+		t.Error("exec note should hide the schema body")
+	}
+}
+
 func TestParseStreamError(t *testing.T) {
 	line := `{"type":"result","subtype":"success","is_error":true,"terminal_reason":"api_error","result":"Not logged in","num_turns":1}` + "\n"
 	res, err := ParseStream(strings.NewReader(line), func(Event) {})

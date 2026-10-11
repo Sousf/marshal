@@ -203,6 +203,9 @@ func (x *Executor) checkCaps(ctx context.Context, repo config.Repo) error {
 		if err != nil {
 			return err
 		}
+		if vs, err := x.Store.VerdictSpendSince(ctx, since); err == nil {
+			usd += vs
+		}
 		if usd >= caps.USDPerDay {
 			return fmt.Errorf("cap: fleet has spent $%.2f in the last 24h (limit $%.2f)", usd, caps.USDPerDay)
 		}

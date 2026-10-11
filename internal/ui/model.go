@@ -68,11 +68,12 @@ type Model struct {
 	visible    []store.Run // runs after filtering, aligned with runList.rows
 
 	// detail
-	run    store.Run
-	events []store.Event
-	lastSq int64
-	view   viewport.Model
-	follow bool
+	run     store.Run
+	verdict *store.Verdict
+	events  []store.Event
+	lastSq  int64
+	view    viewport.Model
+	follow  bool
 
 	// pick modal
 	pickRepo config.Repo
@@ -118,9 +119,10 @@ type refreshed struct {
 }
 
 type detailLoaded struct {
-	run    store.Run
-	events []store.Event
-	err    error
+	run     store.Run
+	events  []store.Event
+	verdict *store.Verdict
+	err     error
 }
 
 type actionDone struct {
@@ -168,7 +170,11 @@ func (m Model) loadDetail(id string, after int64) tea.Cmd {
 			return detailLoaded{err: err}
 		}
 		ev, err := src.EventsAfter(ctx, id, after)
-		return detailLoaded{run: run, events: ev, err: err}
+		d := detailLoaded{run: run, events: ev, err: err}
+		if v, ok, verr := src.Verdict(ctx, run.ID); verr == nil && ok {
+			d.verdict = &v
+		}
+		return d
 	}
 }
 
@@ -207,6 +213,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		first := m.lastSq == 0 && len(m.events) == 0
 		m.run = msg.run
+		m.verdict = msg.verdict
 		if len(msg.events) > 0 {
 			m.events = append(m.events, msg.events...)
 			m.lastSq = msg.events[len(msg.events)-1].Seq
@@ -474,6 +481,7 @@ func (m Model) keyFilter(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) openDetail(id string) (tea.Model, tea.Cmd) {
 	m.screen = detail
 	m.run = store.Run{ID: id}
+	m.verdict = nil
 	m.events = nil
 	m.lastSq = 0
 	m.follow = true

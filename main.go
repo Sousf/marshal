@@ -30,6 +30,7 @@ import (
 	"github.com/Sousf/marshal/internal/runner"
 	"github.com/Sousf/marshal/internal/store"
 	"github.com/Sousf/marshal/internal/ui"
+	"github.com/Sousf/marshal/internal/verifier"
 )
 
 // version is stamped at build time with -X main.version.
@@ -51,6 +52,8 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
       --no-pr                       commit on a local branch only, open nothing
       --keep                        leave the work tree on disk
   marshal trigger <job> <repo>    ask the daemon to run a job in the background
+  marshal verify <run-id>         run the verifier on a proposal here, in the foreground
+      --comment                     also post the verdict on the PR
   marshal runs [repo]             recent runs
   marshal show <run-id>           one run's record and event log
   marshal trust                   where each repo and class sits on the ladder
@@ -131,8 +134,67 @@ func app(args []string) error {
 		return cmdTrigger(ctx, rest)
 	case "autonomy":
 		return cmdAutonomy(ctx, rest)
+	case "verify":
+		return cmdVerify(ctx, fleet, rest)
 	}
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
+}
+
+func cmdVerify(ctx context.Context, f *config.Fleet, args []string) error {
+	comment := false
+	var pos []string
+	for _, a := range args {
+		switch a {
+		case "--comment":
+			comment = true
+		default:
+			if strings.HasPrefix(a, "-") {
+				return fmt.Errorf("unknown flag %q", a)
+			}
+			pos = append(pos, a)
+		}
+	}
+	if len(pos) != 1 {
+		return errors.New("usage: marshal verify <run-id> [--comment]")
+	}
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	r, err := st.GetRun(ctx, pos[0])
+	if err != nil {
+		return err
+	}
+	if r.PRURL == "" {
+		return fmt.Errorf("run %s has no pull request to verify", r.ID)
+	}
+	gh := github.Client{}
+	pr, err := gh.ViewPR(ctx, r.PRURL)
+	if err != nil {
+		return err
+	}
+	v := &verifier.Verifier{Fleet: f, Adapter: runner.Claude{}, WorkRoot: filepath.Join(config.StateDir(), "work"), Log: os.Stdout}
+	res, err := v.Verify(ctx, r, pr)
+	if err != nil {
+		return err
+	}
+	if err := st.PutVerdict(ctx, res.Verdict); err != nil {
+		return err
+	}
+	_ = st.AppendEvent(ctx, r.ID, store.Event{Kind: "note", Text: fmt.Sprintf("verifier (manual): %s · %d turns · $%.2f", res.Verdict.Verdict, res.Turns, res.CostUSD)})
+	fmt.Println()
+	fmt.Println(res.Comment())
+	if comment {
+		if err := gh.CommentPR(ctx, r.PRURL, res.Comment()); err != nil {
+			return err
+		}
+		fmt.Println("posted on", r.PRURL)
+	}
+	if res.Verdict.Verdict != verifier.Pass {
+		os.Exit(2)
+	}
+	return nil
 }
 
 func socketPath() string { return filepath.Join(config.StateDir(), "marshal.sock") }
@@ -213,8 +275,8 @@ func cmdStatus(ctx context.Context) error {
 	if !s.Autonomy {
 		auto = "OFF"
 	}
-	fmt.Printf("daemon: up (%s), started %s\nautonomy: %s\nrunning: %d %s\nspend 24h: $%.2f\nlast tick: %s\n",
-		s.Version, ago(s.Started), auto, len(s.Running), strings.Join(s.Running, " "), s.Spend24h, ago(s.LastTick))
+	fmt.Printf("daemon: up (%s), started %s\nautonomy: %s\nrunning: %d %s\nverifying: %d %s\nspend 24h: $%.2f\nlast tick: %s\n",
+		s.Version, ago(s.Started), auto, len(s.Running), strings.Join(s.Running, " "), len(s.Verifying), strings.Join(s.Verifying, " "), s.Spend24h, ago(s.LastTick))
 	if s.LastError != "" {
 		fmt.Printf("last error: %s\n", s.LastError)
 	}
@@ -432,6 +494,16 @@ func cmdShow(ctx context.Context, args []string) error {
 	fmt.Printf(" · %d turns · $%.2f\n", r.Turns, r.CostUSD)
 	if r.Error != "" {
 		fmt.Printf("  error: %s\n", indent(r.Error, "         "))
+	}
+	if v, ok, _ := st.LatestVerdict(ctx, r.ID); ok {
+		head := v.Head
+		if len(head) > 8 {
+			head = head[:8]
+		}
+		fmt.Printf("  verifier: %s on head %s · %d turns · $%.2f\n", v.Verdict, head, v.Turns, v.CostUSD)
+		if v.Summary != "" {
+			fmt.Printf("            %s\n", indent(v.Summary, "            "))
+		}
 	}
 	ev, err := st.Events(ctx, r.ID)
 	if err != nil {

@@ -75,6 +75,53 @@ func TestPrepareAndCommit(t *testing.T) {
 	}
 }
 
+func TestPrepareHead(t *testing.T) {
+	ctx := context.Background()
+	src := origin(t)
+	// Make a proposal branch in the origin with one commit.
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = src
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("checkout", "-q", "-b", "marshal/j/abc")
+	os.WriteFile(filepath.Join(src, "go.mod"), []byte("module x\n\nrequire evil.example/pkg v1.0.0\n"), 0o644)
+	run("commit", "-q", "-am", "add dep")
+	sha := run("rev-parse", "HEAD")
+	run("checkout", "-q", "main")
+
+	w, err := PrepareHead(ctx, t.TempDir(), config.Repo{Name: "x", URL: src}, "abc", "marshal/j/abc", sha, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove()
+	if got, _ := w.HeadSHA(ctx); got != sha {
+		t.Errorf("head = %s want %s", got, sha)
+	}
+	if w.Repo.Branch != "main" || w.Base() != "origin/main" {
+		t.Errorf("base = %s", w.Base())
+	}
+	ns, _ := w.DiffNumstat(ctx)
+	if !strings.Contains(ns, "go.mod") {
+		t.Errorf("numstat:\n%s", ns)
+	}
+	patch, _ := w.DiffPatch(ctx)
+	if !strings.Contains(patch, "+require evil.example/pkg") {
+		t.Errorf("patch:\n%s", patch)
+	}
+	if before := w.FileAt(ctx, w.Base(), "go.mod"); strings.Contains(before, "evil") {
+		t.Error("base go.mod should not have the dep")
+	}
+	if w.FileAt(ctx, "HEAD", "nope.txt") != "" {
+		t.Error("missing file should be empty")
+	}
+}
+
 func TestPrepareBadURL(t *testing.T) {
 	_, err := Prepare(context.Background(), t.TempDir(), config.Repo{Name: "x", URL: filepath.Join(t.TempDir(), "nope"), Branch: "main"}, "j", "r", config.Identity{}, nil)
 	if err == nil {

@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/Sousf/marshal/internal/runner"
 	"github.com/Sousf/marshal/internal/sched"
 	"github.com/Sousf/marshal/internal/store"
+	"github.com/Sousf/marshal/internal/verifier"
 )
 
 // GitHub is what the daemon needs from GitHub, as an interface so tests can
@@ -27,6 +29,7 @@ type GitHub interface {
 	ViewPR(ctx context.Context, url string) (github.PR, error)
 	MergePR(ctx context.Context, url string) error
 	CommentPR(ctx context.Context, url, body string) error
+	AddLabel(ctx context.Context, url, label string) error
 	LatestCI(ctx context.Context, slug, branch string) (github.CI, bool, error)
 	DefaultBranch(ctx context.Context, slug string) (string, error)
 }
@@ -44,11 +47,12 @@ type Daemon struct {
 	WorkRoot string
 	Log      *log.Logger
 
-	mu       sync.Mutex
-	running  map[string]string // repo -> run ID
-	started  time.Time
-	lastTick time.Time
-	lastErr  string
+	mu        sync.Mutex
+	running   map[string]string // repo -> run ID
+	verifying map[string]bool   // run ID -> in progress
+	started   time.Time
+	lastTick  time.Time
+	lastErr   string
 	// now is swapped in tests.
 	now func() time.Time
 }
@@ -59,6 +63,9 @@ const autonomyKey = "autonomy"
 func (d *Daemon) init() {
 	if d.running == nil {
 		d.running = map[string]string{}
+	}
+	if d.verifying == nil {
+		d.verifying = map[string]bool{}
 	}
 	if d.now == nil {
 		d.now = time.Now
@@ -129,6 +136,7 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 		return err
 	}
 	autonomy := d.Autonomy(ctx)
+	vcfg := d.Fleet.ResolveVerifier()
 	ladder := policy.Ladder{Fleet: d.Fleet}
 	for _, r := range runs {
 		if r.PRURL == "" {
@@ -157,14 +165,32 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			d.note(ctx, r.ID, "closed without merging")
 			d.move(ctx, ladder, repo, r.Class, policy.Rejected)
 		default:
-			if !autonomy {
-				continue
+			by, reason := "", ""
+			if autonomy {
+				by, reason = d.mayMerge(ctx, ladder, repo, r, pr)
 			}
-			by, reason := d.mayMerge(ctx, ladder, repo, r, pr)
-			if by == "" {
+			// Verification happens when a merge would otherwise be
+			// autonomous, or on every proposal when the policy says so.
+			if by == "" && !vcfg.Always {
 				if reason != "" {
 					d.Log.Printf("run %s: holding: %s", r.ID, reason)
 				}
+				continue
+			}
+			verdict, ok, err := d.Store.LatestVerdict(ctx, r.ID)
+			if err != nil {
+				return err
+			}
+			stale := !ok || (pr.HeadSHA != "" && verdict.Head != pr.HeadSHA)
+			if stale {
+				d.startVerify(ctx, r, pr)
+				continue
+			}
+			if by == "" {
+				continue
+			}
+			if verdict.Verdict != verifier.Pass {
+				d.Log.Printf("run %s: holding: verifier said %s", r.ID, verdict.Verdict)
 				continue
 			}
 			if err := d.GH.MergePR(ctx, r.PRURL); err != nil {
@@ -175,7 +201,7 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			r.MergedBy = by
 			r.FinishedAt = d.now()
 			d.note(ctx, r.ID, "merged by marshal (%s)", by)
-			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("Merged by MARSHAL: class `%s` is at level `%s` for this repository, checks were green, and the %s gate passed.", r.Class, by, by))
+			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("Merged by MARSHAL: class `%s` is at level `%s` for this repository, checks were green, the verifier passed head `%s`, and the %s gate passed.", r.Class, by, short(verdict.Head), by))
 		}
 		if err := d.Store.UpdateRun(ctx, &r); err != nil {
 			return err
@@ -233,6 +259,68 @@ func (d *Daemon) mayMerge(ctx context.Context, ladder policy.Ladder, repo config
 		return "soak", ""
 	}
 	return "auto", ""
+}
+
+// startVerify runs the verifier for a proposal in the background, once per
+// head. The verdict, whatever it is, is recorded against the head so the
+// same commit is never paid for twice; a failure to verify is recorded as
+// UNSURE for the same reason.
+func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
+	d.mu.Lock()
+	if d.verifying[r.ID] {
+		d.mu.Unlock()
+		return
+	}
+	d.verifying[r.ID] = true
+	d.mu.Unlock()
+	d.note(ctx, r.ID, "verifying head %s", short(pr.HeadSHA))
+	v := &verifier.Verifier{Fleet: d.Fleet, Adapter: d.Adapter, WorkRoot: d.WorkRoot}
+	bg := context.WithoutCancel(ctx)
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			delete(d.verifying, r.ID)
+			d.mu.Unlock()
+		}()
+		res, err := v.Verify(bg, r, pr)
+		if err != nil {
+			d.fail("run %s: verify: %v", r.ID, err)
+			res.RunID = r.ID
+			if res.Head == "" {
+				res.Head = pr.HeadSHA
+			}
+			res.Verdict.Verdict = verifier.Unsure
+			res.Summary = "The verifier could not complete: " + err.Error()
+		}
+		if res.Head == "" {
+			res.Head = pr.HeadSHA
+		}
+		if err := d.Store.PutVerdict(bg, res.Verdict); err != nil {
+			d.fail("run %s: verdict: %v", r.ID, err)
+			return
+		}
+		d.note(bg, r.ID, "verifier: %s · %d turns · $%.2f · %s", res.Verdict.Verdict, res.Turns, res.CostUSD, firstLine(res.Summary))
+		if err := d.GH.CommentPR(bg, r.PRURL, res.Comment()); err != nil {
+			d.fail("run %s: comment: %v", r.ID, err)
+		}
+		if res.Verdict.Verdict != verifier.Pass {
+			if err := d.GH.AddLabel(bg, r.PRURL, "marshal:needs-human"); err != nil {
+				d.fail("run %s: label: %v", r.ID, err)
+			}
+		}
+	}()
+}
+
+func short(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
+}
+
+func firstLine(s string) string {
+	s, _, _ = strings.Cut(strings.TrimSpace(s), "\n")
+	return s
 }
 
 // move applies an outcome to the ladder and persists it.
@@ -402,7 +490,13 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 		d.mu.Lock()
 		st := &api.Status{Version: d.Version, Started: d.started, Running: d.inFlightLocked(),
 			Repos: len(d.Fleet.Repos), Jobs: len(d.Fleet.Jobs), Spend24h: spend, LastTick: d.lastTick, LastError: d.lastErr}
+		for id := range d.verifying {
+			st.Verifying = append(st.Verifying, id)
+		}
 		d.mu.Unlock()
+		if vs, err := d.Store.VerdictSpendSince(ctx, d.now().Add(-24*time.Hour)); err == nil {
+			st.Spend24h += vs
+		}
 		st.Autonomy = d.Autonomy(ctx)
 		return api.Response{Status: st}
 	case "runs":
@@ -445,6 +539,20 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 			return api.Fail("autonomy: want on or off")
 		}
 		return api.Response{Status: &api.Status{Autonomy: d.Autonomy(ctx)}}
+	case "verdict":
+		r, err := d.Store.GetRun(ctx, req.ID)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		v, ok, err := d.Store.LatestVerdict(ctx, r.ID)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		resp := api.Response{Run: &r}
+		if ok {
+			resp.Verdict = &v
+		}
+		return resp
 	case "trust":
 		recorded, err := d.Store.ListTrust(ctx)
 		if err != nil {

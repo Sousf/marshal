@@ -36,9 +36,17 @@ Working today:
   window elapsed, daily cap not hit, kill switch on).
 - `marshal tui` shows the fleet, the runs, a live run's tool calls, and the
   ladder, and can start a job or flip the kill switch.
+- The verifier: before any autonomous merge, a second agent that never saw
+  the proposer's session checks out the PR head, reads only the diff and the
+  claim, runs the tests, and answers PASS, FAIL or UNSURE through a fixed
+  schema. Only PASS merges. Anything else holds the PR for you, posts the
+  findings as a comment, and labels it `marshal:needs-human`. Deterministic
+  checks the model cannot be talked out of run alongside it: a new module in
+  go.mod or a changed workflow action fails the verdict on their own. The
+  verdict is bound to the head SHA, so a new push re-verifies.
 
-Not yet: a verifier agent that reads the diff before auto-merge, post-merge
-revert watch, memory-as-PR, adapters for agents other than Claude Code.
+Not yet: post-merge revert watch, memory-as-PR, adapters for agents other
+than Claude Code.
 
 ## Run it yourself
 
@@ -89,6 +97,17 @@ to an agent goes through an adapter interface, and the stream parser is
 tested against recorded output. A cheap real run is a fleet file with
 `model: claude-haiku-5-5`, `max_turns: 8`, `max_usd: 0.50` and a one-line
 job; `examples/smoke-fleet.yaml` is one; a run costs about one cent.
+
+### Trying the verifier
+
+```sh
+marshal verify <run-id>              # verify a proposal now, print the verdict
+marshal verify <run-id> --comment    # and post it on the PR
+```
+
+Set `policy.verifier.always: true` to have every proposal verified and
+commented, whatever its trust level. It costs a verifier run per PR and
+makes your own review a read of the findings rather than of the diff.
 
 ### Trying autonomy safely
 

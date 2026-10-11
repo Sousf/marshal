@@ -58,6 +58,9 @@ type Request struct {
 	// Env is added to the agent's environment. Secrets for one run go here
 	// rather than in the daemon's environment.
 	Env []string
+	// JSONSchema, when set, asks the harness for a structured final answer
+	// matching the schema. The parsed object lands in Result.Structured.
+	JSONSchema string
 }
 
 // Result summarises a finished run.
@@ -76,6 +79,8 @@ type Result struct {
 	Denials []string
 	// Stop is the harness's own reason for ending, when it gives one.
 	Stop string
+	// Structured is the schema-shaped answer when one was requested.
+	Structured json.RawMessage
 }
 
 // Adapter runs an agent.

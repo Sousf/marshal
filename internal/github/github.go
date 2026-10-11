@@ -38,6 +38,12 @@ type PR struct {
 	Labels []string
 	// MergedBy is the login that merged, when merged.
 	MergedBy string
+	// HeadSHA is the commit the PR currently points at; HeadRef its branch.
+	HeadSHA string
+	HeadRef string
+	BaseRef string
+	Title   string
+	Body    string
 }
 
 // Merged reports whether the PR was merged.
@@ -73,12 +79,17 @@ type prJSON struct {
 		Conclusion string `json:"conclusion"`
 		State      string `json:"state"`
 	} `json:"statusCheckRollup"`
+	HeadRefOid  string `json:"headRefOid"`
+	HeadRefName string `json:"headRefName"`
+	BaseRefName string `json:"baseRefName"`
+	Title       string `json:"title"`
+	Body        string `json:"body"`
 }
 
 // ViewPR fetches a pull request by URL.
 func (c Client) ViewPR(ctx context.Context, url string) (PR, error) {
 	out, err := c.gh(ctx, "pr", "view", url, "--json",
-		"number,state,mergedAt,closedAt,reviewDecision,mergedBy,labels,statusCheckRollup")
+		"number,state,mergedAt,closedAt,reviewDecision,mergedBy,labels,statusCheckRollup,headRefOid,headRefName,baseRefName,title,body")
 	if err != nil {
 		return PR{}, err
 	}
@@ -87,7 +98,8 @@ func (c Client) ViewPR(ctx context.Context, url string) (PR, error) {
 		return PR{}, fmt.Errorf("gh pr view: %w", err)
 	}
 	p := PR{URL: url, Number: j.Number, State: j.State, MergedAt: j.MergedAt, ClosedAt: j.ClosedAt,
-		Review: j.ReviewDecision, MergedBy: j.MergedBy.Login}
+		Review: j.ReviewDecision, MergedBy: j.MergedBy.Login, HeadSHA: j.HeadRefOid, HeadRef: j.HeadRefName,
+		BaseRef: j.BaseRefName, Title: j.Title, Body: j.Body}
 	for _, l := range j.Labels {
 		p.Labels = append(p.Labels, l.Name)
 	}
@@ -124,6 +136,17 @@ func rollup(j prJSON) string {
 // MergePR squash-merges and deletes the branch.
 func (c Client) MergePR(ctx context.Context, url string) error {
 	_, err := c.gh(ctx, "pr", "merge", url, "--squash", "--delete-branch")
+	return err
+}
+
+// AddLabel puts a label on a PR, creating it in the repo if needed.
+func (c Client) AddLabel(ctx context.Context, url, label string) error {
+	// Label creation needs the repo; gh resolves it from the PR URL for
+	// `pr edit` but not for `label create`, so derive the slug.
+	if slug, ok := Slug(url); ok {
+		_, _ = c.gh(ctx, "label", "create", label, "--repo", slug, "--color", "d93f0b", "--description", "Set by MARSHAL")
+	}
+	_, err := c.gh(ctx, "pr", "edit", url, "--add-label", label)
 	return err
 }
 
@@ -209,11 +232,11 @@ func (c Client) OpenPRs(ctx context.Context, slug, label string) ([]PR, error) {
 	return prs, nil
 }
 
-var slugRE = regexp.MustCompile(`github\.com[:/]([^/]+)/([^/\s]+?)(?:\.git)?/?$`)
+var slugRE = regexp.MustCompile(`github\.com[:/]([^/\s]+)/([^/\s]+?)(?:\.git)?(?:/.*)?$`)
 
-// Slug extracts owner/repo from a GitHub URL in ssh or https form. ok is
-// false for anything else, such as a local path, in which case there is
-// nothing for gh to talk to.
+// Slug extracts owner/repo from a GitHub URL in ssh or https form, including
+// a pull request URL. ok is false for anything else, such as a local path,
+// in which case there is nothing for gh to talk to.
 func Slug(url string) (string, bool) {
 	m := slugRE.FindStringSubmatch(strings.TrimSpace(url))
 	if m == nil {
