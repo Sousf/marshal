@@ -33,6 +33,7 @@ archives:
     files:
       - README.md
       - SECURITY.md
+      - LICENSE
 
 checksum:
   name_template: checksums.txt
@@ -53,6 +54,7 @@ brews:
     directory: Formula
     homepage: https://github.com/Sousf/marshal
     description: Agentic maintainer that keeps a fleet of repositories secure
+    license: MIT
     commit_author:
       name: goreleaser
       email: noreply@github.com
