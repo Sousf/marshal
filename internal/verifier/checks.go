@@ -63,7 +63,7 @@ func (c Checks) Fatal() bool {
 }
 
 // Run computes the checks from the base and head go.mod and the patch.
-func Run(baseGoMod, headGoMod, patch string, class string) Checks {
+func Run(baseGoMod, headGoMod, patch string) Checks {
 	var c Checks
 	// New modules. A dependency job may bump versions; it may not add
 	// modules. Every class is held to that.

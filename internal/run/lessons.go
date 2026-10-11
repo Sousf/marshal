@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/Sousf/marshal/internal/store"
 )
@@ -163,6 +162,5 @@ func History(ctx context.Context, st *store.Store, repo, job string) string {
 	if n == 0 {
 		return ""
 	}
-	_ = time.Now
 	return b.String()
 }

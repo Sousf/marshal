@@ -131,11 +131,13 @@ func (a *App) base() string {
 	return "https://api.github.com"
 }
 
+var defaultHTTP = &http.Client{Timeout: 30 * time.Second}
+
 func (a *App) http() *http.Client {
 	if a.HTTP != nil {
 		return a.HTTP
 	}
-	return &http.Client{Timeout: 30 * time.Second}
+	return defaultHTTP
 }
 
 // JWT signs the app assertion. Issued a minute in the past to absorb clock

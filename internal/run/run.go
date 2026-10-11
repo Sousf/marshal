@@ -539,10 +539,6 @@ func (x *Executor) report(ctx context.Context, name, prompt string, opts Options
 	return finish(store.Reported, "")
 }
 
-func cloneURL(x *Executor, repo config.Repo) string {
-	return ghapp.CloneURL(repo)
-}
-
 func (x *Executor) workRoot() string {
 	if x.WorkRoot != "" {
 		return x.WorkRoot

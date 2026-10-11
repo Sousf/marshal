@@ -114,6 +114,11 @@ func (c Claude) Run(ctx context.Context, req Request, emit func(Event)) (Result,
 	}
 
 	res, perr := ParseStream(stdout, emit)
+	if perr != nil && cmd.Process != nil {
+		// We stopped reading; the child would block on a full pipe and
+		// Wait would never return. Kill it and let WaitDelay reap it.
+		_ = cmd.Process.Kill()
+	}
 	werr := cmd.Wait()
 	if res.Duration == 0 {
 		res.Duration = time.Since(started)

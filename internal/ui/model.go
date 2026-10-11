@@ -242,12 +242,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
-		// Row strings carry the spinner frame baked in, so rebuild them
-		// while anything is running; otherwise the list spinners freeze
-		// between data refreshes.
-		if m.anyRunning() {
-			m.fillLists()
-		}
+		// Row strings carry the spinner frame baked in. Rebuilding every row
+		// ten times a second is wasteful, so only the status cell of rows
+		// that are running is redrawn on a spinner tick.
+		m.spinRows()
 		return m, cmd
 	case tick:
 		cmds := []tea.Cmd{m.refresh(), tickCmd()}
@@ -374,6 +372,17 @@ func (m *Model) fillLists() {
 			fmt.Sprint(t.Approvals), fmt.Sprint(t.Rejections), fmt.Sprint(t.Reverts), ""})
 	}
 	m.trustList.setRows(trows)
+}
+
+// spinRows redraws the status cell of running rows with the current
+// spinner frame.
+func (m *Model) spinRows() {
+	frame := m.spin.View()
+	for i, r := range m.visible {
+		if r.Status == store.Running && i < len(m.runList.rows) && len(m.runList.rows[i]) > 4 {
+			m.runList.rows[i][4] = statusCell(store.Running, frame)
+		}
+	}
 }
 
 func (m Model) anyRunning() bool {
@@ -777,9 +786,21 @@ func openPR(r store.Run) tea.Cmd {
 	}
 }
 
+// mdCache remembers the last rendered report. Building a glamour renderer
+// and rendering is the most expensive thing the interface does, and the
+// detail view re-renders on every poll while a run is open.
+var mdCache struct {
+	md    string
+	width int
+	out   string
+}
+
 // renderMarkdown renders the agent's report. Falls back to plain text if
 // the renderer is unhappy, which beats showing nothing.
 func renderMarkdown(md string, width int) string {
+	if mdCache.md == md && mdCache.width == width && mdCache.out != "" {
+		return mdCache.out
+	}
 	r, err := glamour.NewTermRenderer(glamour.WithAutoStyle(), glamour.WithWordWrap(max(width-4, 20)))
 	if err != nil {
 		return md
@@ -788,7 +809,9 @@ func renderMarkdown(md string, width int) string {
 	if err != nil {
 		return md
 	}
-	return strings.TrimRight(out, "\n")
+	res := strings.TrimRight(out, "\n")
+	mdCache.md, mdCache.width, mdCache.out = md, width, res
+	return res
 }
 
 // helpers

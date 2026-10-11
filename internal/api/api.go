@@ -105,6 +105,9 @@ func Serve(ctx context.Context, path string, h Handler) error {
 
 func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 	defer conn.Close()
+	// A client that connects and says nothing must not pin a goroutine for
+	// the daemon's lifetime.
+	_ = conn.SetReadDeadline(time.Now().Add(time.Minute))
 	sc := bufio.NewScanner(conn)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	enc := json.NewEncoder(conn)
@@ -122,6 +125,7 @@ func serveConn(ctx context.Context, conn net.Conn, h Handler) {
 		if err := enc.Encode(resp); err != nil {
 			return
 		}
+		_ = conn.SetReadDeadline(time.Now().Add(time.Minute))
 	}
 }
 

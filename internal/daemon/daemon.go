@@ -78,6 +78,9 @@ type Daemon struct {
 	now func() time.Time
 }
 
+// maxConcurrentTasks bounds repo-less tasks in flight at once.
+const maxConcurrentTasks = 3
+
 // autonomyKey is the settings row for the kill switch.
 const autonomyKey = "autonomy"
 
@@ -1077,6 +1080,18 @@ func (d *Daemon) TriggerTask(ctx context.Context, name, prompt, repoName, class 
 	d.mu.Lock()
 	id := store.NewID()
 	if key == "" {
+		// Repo-less tasks run beside each other, but not without limit: each
+		// is an agent process and a clone of the memory repo.
+		n := 0
+		for k := range d.running {
+			if strings.HasPrefix(k, "task:") {
+				n++
+			}
+		}
+		if n >= maxConcurrentTasks {
+			d.mu.Unlock()
+			return "", fmt.Errorf("%d tasks already running; try again when one finishes", n)
+		}
 		key = "task:" + id
 	}
 	if busy, ok := d.running[key]; ok {

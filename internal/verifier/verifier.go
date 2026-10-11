@@ -139,7 +139,7 @@ func (v *Verifier) Verify(ctx context.Context, run store.Run, pr github.PR) (Res
 		return Result{}, err
 	}
 	numstat, _ := ws.DiffNumstat(ctx)
-	checks := Run(ws.FileAt(ctx, ws.Base(), "go.mod"), ws.FileAt(ctx, "HEAD", "go.mod"), patch, job.Class)
+	checks := Run(ws.FileAt(ctx, ws.Base(), "go.mod"), ws.FileAt(ctx, "HEAD", "go.mod"), patch)
 	for _, f := range checks.Findings() {
 		v.logf("verify %s: check: %s", run.ID, f.Detail)
 	}

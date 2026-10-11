@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/skills"
 	"github.com/Sousf/marshal/internal/store"
 	"github.com/Sousf/marshal/internal/workspace"
@@ -33,7 +34,7 @@ func (x *Executor) openMemory(ctx context.Context, runID string, identity config
 		return nil
 	}
 	if x.Auth != nil {
-		repo.URL = cloneURL(x, repo)
+		repo.URL = ghapp.CloneURL(repo)
 	}
 	ws, err := workspace.Prepare(ctx, x.workRoot(), repo, "skill", runID, identity, env)
 	if err != nil {

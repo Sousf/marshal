@@ -4,8 +4,6 @@ package jobs
 
 import (
 	"embed"
-	"sort"
-	"strings"
 )
 
 //go:embed *.md
@@ -18,17 +16,6 @@ func Prompt(name string) (string, bool) {
 		return "", false
 	}
 	return string(b), true
-}
-
-// Names lists the embedded briefs.
-func Names() []string {
-	entries, _ := files.ReadDir(".")
-	var out []string
-	for _, e := range entries {
-		out = append(out, strings.TrimSuffix(e.Name(), ".md"))
-	}
-	sort.Strings(out)
-	return out
 }
 
 // Contract is appended to every brief. It is the part of the prompt the

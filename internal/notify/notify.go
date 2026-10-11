@@ -218,11 +218,15 @@ func (w Webhook) Send(ctx context.Context, e Event) error {
 	return do(client(w.HTTP), req)
 }
 
+// defaultHTTP is shared so connections are reused rather than a new
+// transport being built per notification.
+var defaultHTTP = &http.Client{Timeout: 15 * time.Second}
+
 func client(c *http.Client) *http.Client {
 	if c != nil {
 		return c
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return defaultHTTP
 }
 
 func do(c *http.Client, req *http.Request) error {

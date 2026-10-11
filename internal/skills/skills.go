@@ -11,7 +11,6 @@ package skills
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -220,13 +219,12 @@ func ParseProposals(report string, learnedFrom string) (rest string, proposals [
 type Library struct {
 	Skills   []Skill
 	Operator string
-	Root     string
 }
 
 // Open loads a library from root (the skills directory).
 func Open(root string) (*Library, []error) {
 	sk, errs := Load(root)
-	return &Library{Skills: sk, Operator: LoadOperator(root), Root: root}, errs
+	return &Library{Skills: sk, Operator: LoadOperator(root)}, errs
 }
 
 // Search ranks skills against a query by term overlap, names and tags
@@ -334,6 +332,3 @@ func clip(s string, n int) string {
 	}
 	return s
 }
-
-// ErrNoLibrary is returned when memory is not configured.
-var ErrNoLibrary = errors.New("no memory repository configured")
