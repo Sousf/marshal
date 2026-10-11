@@ -155,6 +155,12 @@ memory:
   # nudge_turns: 20
   # nudge_model: claude-sonnet-5-5
 
+# The Homebrew tap every tool publishes to. With it, onboarding checks that
+# each Go repo releases there and, if not, opens a PR wiring it up (from
+# templates, without an agent). Then run "marshal tap-key <repo>" once.
+# homebrew:
+#   tap: Sousf/homebrew-tap
+
 # The deny floor. Nothing a job, task, chat, contract or trust level says
 # can lift it: paths are locked everywhere, tools are disallowed for every
 # agent, auto_merge (repo/class globs) always waits for a human.

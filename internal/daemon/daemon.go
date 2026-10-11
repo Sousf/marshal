@@ -340,7 +340,7 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 		default:
 			// A release PR is the operator's call, and its files are
 			// MARSHAL's own bookkeeping: no agent follows up on it.
-			if r.Job == run.ReleaseJob {
+			if r.Job == run.ReleaseJob || r.Job == run.BrewSetupJob {
 				continue
 			}
 			// Red checks on MARSHAL's own PR are MARSHAL's to fix, within a

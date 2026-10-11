@@ -63,6 +63,9 @@ type Fleet struct {
 	// Never is the deny floor. Nothing a job, task, chat, contract or trust
 	// level says can lift it.
 	Never Never `yaml:"never"`
+	// Homebrew, when set, makes onboarding check that each Go repo
+	// releases to this tap, and propose the wiring when it does not.
+	Homebrew Homebrew `yaml:"homebrew"`
 
 	// dir is where the file was read from; relative prompt paths resolve
 	// against it.
@@ -133,6 +136,24 @@ func (f *Fleet) MemoryRepo() (Repo, string, bool) {
 		dir = "skills"
 	}
 	return r, dir, true
+}
+
+// Homebrew names the tap every tool in the fleet publishes to.
+type Homebrew struct {
+	// Tap is owner/name of the tap repository, e.g. Sousf/homebrew-tap.
+	Tap string `yaml:"tap"`
+	// Branch is the tap's branch. Empty means main.
+	Branch string `yaml:"branch"`
+}
+
+// TapParts splits the tap into owner, repository and branch.
+func (h Homebrew) TapParts() (owner, name, branch string, ok bool) {
+	owner, name, ok = strings.Cut(h.Tap, "/")
+	branch = h.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	return owner, name, branch, ok && owner != "" && name != "" && !strings.Contains(name, "/")
 }
 
 // Never lists what no run may do, whatever else is configured. It only adds
@@ -522,6 +543,11 @@ func (f *Fleet) validate() error {
 	for _, p := range append(append([]string{}, f.Never.Paths...), f.Never.AutoMerge...) {
 		if _, err := path.Match(strings.TrimPrefix(p, "**/"), "x"); err != nil {
 			errs = append(errs, fmt.Errorf("never: bad pattern %q: %w", p, err))
+		}
+	}
+	if f.Homebrew.Tap != "" {
+		if _, _, _, ok := f.Homebrew.TapParts(); !ok {
+			errs = append(errs, fmt.Errorf("homebrew.tap: want owner/name, got %q", f.Homebrew.Tap))
 		}
 	}
 	for _, t := range f.Never.Tools {

@@ -1,0 +1,39 @@
+# Written by MARSHAL onboarding as a starting point: check the platforms and
+# CGO_ENABLED before merging. GoReleaser builds <<.Bin>> when the release
+# workflow tags VERSION, publishes a GitHub release, and updates the formula
+# in <<.Tap>>.
+version: 2
+
+project_name: <<.Name>>
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: <<.Bin>>
+    main: <<.Main>>
+    binary: <<.Bin>>
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w<<if .Version>>
+      - -X main.version={{ .Version }}<<end>>
+
+archives:
+  - id: <<.Bin>>
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"<<if .Files>>
+    files:<<range .Files>>
+      - <<.>><<end>><<end>>
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  disable: true # the release PR's notes are in CHANGELOG.md

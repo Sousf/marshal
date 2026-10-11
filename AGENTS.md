@@ -59,6 +59,10 @@ Rules the code enforces, which no change may weaken:
   force-pushes `marshal/release`, which it rebuilds from the base every
   time. `VERSION` and `CHANGELOG.md` are always locked for agents, and
   release PRs get no follow-ups.
+- Brew setup (`run/brew.go`) is also Go from templates in
+  `run/templates/`. `.github/workflows/release.yml` must equal the
+  template rendered for master; a test checks. `marshal tap-key` runs with
+  the operator's gh login, never the app's.
 - See `SECURITY.md`: in-process checks are heuristics; only OS isolation
   is a boundary. Do not describe an allowlist as one.
 - No autonomous merge without a PASS verdict bound to the PR's current head.

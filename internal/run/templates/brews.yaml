@@ -1,0 +1,25 @@
+
+# Written by MARSHAL onboarding. A formula rather than a cask, so it installs
+# on Linux too. Pushed over SSH with a deploy key that can write to the tap
+# and nothing else; `marshal tap-key <<.Repo>>` creates it.
+brews:
+  - name: <<.Bin>>
+    repository:
+      owner: <<.TapOwner>>
+      name: <<.TapName>>
+      branch: <<.TapBranch>>
+      git:
+        url: git@github.com:<<.TapOwner>>/<<.TapName>>.git
+        private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY_PATH }}"
+    directory: Formula
+    homepage: <<.Homepage>>
+    description: <<.Desc>><<if .License>>
+    license: <<.License>><<end>>
+    commit_author:
+      name: goreleaser
+      email: noreply@github.com
+    install: |
+      bin.install "<<.Bin>>"
+    test: |<<if .VersionCmd>>
+      assert_match version.to_s, shell_output("#{bin}/<<.Bin>> version")<<else>>
+      assert_predicate bin/"<<.Bin>>", :executable?<<end>>

@@ -10,9 +10,7 @@ import (
 	"time"
 
 	"github.com/Sousf/marshal/internal/config"
-	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/store"
-	"github.com/Sousf/marshal/internal/workspace"
 )
 
 // The release job is deterministic: no agent, no model, no spend. It keeps
@@ -168,18 +166,7 @@ func (x *Executor) release(ctx context.Context, job config.Job, repo config.Repo
 	}
 	logf("note", "run %s: release on %s (deterministic, no agent)", rec.ID, repo.Name)
 
-	env := opts.Env
-	identity := x.Fleet.Defaults.Identity
-	if x.Auth != nil {
-		full, err := x.Auth.Env(ctx, ghapp.Full)
-		if err != nil {
-			return finish(store.Failed, err.Error())
-		}
-		env = append(append([]string{}, opts.Env...), full...)
-		repo.URL = ghapp.CloneURL(repo)
-		identity = x.Auth.Identity()
-	}
-	ws, err := workspace.Prepare(ctx, x.workRoot(), repo, job.Name, rec.ID, identity, env)
+	ws, err := x.harnessClone(ctx, repo, job.Name, rec.ID, opts.Env)
 	if err != nil {
 		return finish(store.Failed, err.Error())
 	}

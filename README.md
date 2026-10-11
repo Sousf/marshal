@@ -158,6 +158,17 @@ Working today:
   updates the Homebrew tap. Agents cannot edit `VERSION`, `CHANGELOG.md`
   or release workflows, and release PRs never merge on their own.
 
+- Homebrew onboarding. With `homebrew.tap` set, onboarding checks each Go
+  repo for a GoReleaser `brews` section and the standard release
+  workflow. If either is missing, MARSHAL fills fixed templates from what
+  it reads in the repo (main package, version variable, licence, README
+  summary), checks that it cross-compiles with `CGO_ENABLED=0`, and opens
+  a "Release through Homebrew" PR. Agents never write these files. The
+  deploy key the workflow pushes with needs admin rights the app doesn't
+  have, so you run `marshal tap-key <repo>` once. It uses your own gh
+  login, and the private key goes from memory to the repo secret without
+  touching disk.
+
 [SECURITY.md](SECURITY.md) is the trust model: what is a boundary, what is
 only a heuristic, and the gaps that remain until runs are isolated.
 

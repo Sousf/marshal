@@ -78,6 +78,16 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	if job.Name == ReleaseJob {
 		return x.release(ctx, job, repo, opts)
 	}
+	if job.Name == "onboard" && x.Fleet.Homebrew.Tap != "" {
+		// Its own run and its own PR: the release pipeline is written by
+		// Go from templates, never by the onboarding agent, which may not
+		// touch release files.
+		if r, err := x.brewSetup(ctx, repo, Options{Log: opts.Log, NoPR: opts.NoPR, Env: opts.Env}); err != nil && opts.Log != nil {
+			fmt.Fprintf(opts.Log, "brew setup: %v\n", err)
+		} else if r.PRURL != "" && opts.Log != nil {
+			fmt.Fprintf(opts.Log, "brew setup: %s %s\n", r.Status, r.PRURL)
+		}
+	}
 	return x.executeJob(ctx, job, repo, opts)
 }
 
