@@ -142,6 +142,18 @@ policy:
 memory:
   repo: marshal
   dir: skills
+  # A run this long that proposed no skill is asked, by a cheap model with
+  # no tools, whether it taught one. -1 turns it off.
+  # nudge_turns: 20
+  # nudge_model: claude-sonnet-5-5
+
+# The deny floor. Nothing a job, task, chat, contract or trust level says
+# can lift it: paths are locked everywhere, tools are disallowed for every
+# agent, auto_merge (repo/class globs) always waits for a human.
+# never:
+#   paths: ["deploy/**"]
+#   tools: ["Bash(docker:*)"]
+#   auto_merge: ["marshal/*"]
 
 # Scheduled free-form tasks. With repo: a PR; without: a report under
 # ~/.local/share/marshal/reports, and a notification.

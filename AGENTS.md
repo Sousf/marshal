@@ -44,6 +44,19 @@ Rules the code enforces, which no change may weaken:
 - Every autonomous merge is watched until the default branch's CI reports
   on it; red reverts and demotes. Human merges are never reverted by
   MARSHAL.
+- The fleet's `never:` block only adds restrictions. Its tools are applied
+  in `runner.Claude` itself and in chat, so no caller can skip them; its
+  paths join every policy check; its `auto_merge` patterns are checked in
+  `mayMerge` before anything else.
+- Every agent invocation goes through `runner.Guard`. A quota stop holds
+  the whole fleet until the reset, and a quota error never records a
+  verifier verdict or opens an incident.
+- Memory in a brief is capped (`skills.OperatorCap`, `skills.SkillCap`,
+  `run.HistoryCap`) and comes before the per-run sections.
+- The skill nudge has no tools and its answer goes through the same skill
+  path as any proposal: `skills.Check`, then a memory-class PR.
+- See `SECURITY.md`: in-process checks are heuristics; only OS isolation
+  is a boundary. Do not describe an allowlist as one.
 - No autonomous merge without a PASS verdict bound to the PR's current head.
   The verifier gets read-only tools and never the proposer's transcript.
   `verifier.Checks.Fatal` outranks the model's answer.

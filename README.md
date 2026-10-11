@@ -123,6 +123,34 @@ Working today:
   skipped without even cloning. Procedural jobs default to Sonnet at
   medium effort; `--force` runs the agent regardless of the probe.
 
+- The `never:` floor. A block in the fleet file that nothing can lift: its
+  `paths` are locked for every job, task and follow-up, its `tools` are
+  disallowed for every agent including the verifier and chat, and its
+  `auto_merge` patterns (`repo/class`, globs) hold matching proposals for
+  a human at any trust level.
+- Incidents. A failure is filed under a signature: repo, job and the error
+  with ids, shas, temp paths, times and numbers stripped. You hear about a
+  new incident once, get a daily reminder until you `marshal ack` it, and
+  the next success closes it. `marshal incidents` lists them; the status
+  line counts the open ones.
+- Quota hold. When Claude Code stops on a usage or rate limit, MARSHAL
+  reads the reset time it reports, parks every agent run until then (the
+  scheduler, follow-ups, tasks and the verifier alike), says so once, and
+  picks up on its own afterwards. `marshal quota` shows it, `marshal quota
+  clear` lifts it early.
+- Skill nudge. A run of 20 turns or more that proposed no skill gets one
+  cheap, tool-less Sonnet call over a bounded digest of what it did,
+  asking whether there was a procedure worth keeping. If there was, it
+  becomes a reviewed skill PR like any other. `memory.nudge_turns`
+  (`-1` turns it off) and `memory.nudge_model` configure it.
+- Small, stable memory in briefs. The operator profile is capped at 2200
+  bytes, each injected skill at 2000 and run history at 1375, with the path
+  to the full text. The stable part of a brief comes first and what
+  changes per run comes last, so consecutive runs share a cacheable prefix.
+
+[SECURITY.md](SECURITY.md) is the trust model: what is a boundary, what is
+only a heuristic, and the gaps that remain until runs are isolated.
+
 Not yet: `marshal doctor` for contract conformance and a posture score,
 adapters for agents other than Claude Code, a review screen in the
 interface, an inbound chat channel such as Telegram for dispatching from a
