@@ -10,108 +10,167 @@ import (
 	"github.com/Sousf/marshal/internal/store"
 )
 
-var (
-	accent = lipgloss.AdaptiveColor{Light: "#5a32d6", Dark: "#b39dff"}
-	dim    = lipgloss.AdaptiveColor{Light: "#6b6b6b", Dark: "#8a8a8a"}
-	good   = lipgloss.AdaptiveColor{Light: "#1a7f37", Dark: "#56d364"}
-	warn   = lipgloss.AdaptiveColor{Light: "#9a6700", Dark: "#e3b341"}
-	bad    = lipgloss.AdaptiveColor{Light: "#cf222e", Dark: "#ff7b72"}
-
-	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(accent)
-	dimStyle   = lipgloss.NewStyle().Foreground(dim)
-	tabOn      = lipgloss.NewStyle().Bold(true).Underline(true)
-	tabOff     = lipgloss.NewStyle().Foreground(dim)
-	cardStyle  = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(dim).Padding(0, 1)
-	cardOn     = cardStyle.BorderForeground(accent)
-	flashStyle = lipgloss.NewStyle().Foreground(warn)
-)
-
 func (m Model) View() string {
 	if m.width == 0 {
-		return "starting..."
+		return "starting…"
 	}
 	var b strings.Builder
 	b.WriteString(m.header())
 	b.WriteString("\n")
-	switch m.screen {
-	case dashboard:
-		b.WriteString(m.viewDashboard())
-	case runs:
-		b.WriteString(m.runTable.View())
-	case trust:
-		b.WriteString(m.trustTable.View())
-	case detail:
-		b.WriteString(m.view.View())
-	case pickJob:
-		b.WriteString(m.viewPick())
+	b.WriteString(m.tabs())
+	b.WriteString("\n\n")
+	if m.modal != none {
+		b.WriteString(m.renderModal())
+	} else {
+		if m.screen == runs && (m.filtering || m.filter.Value() != "") {
+			b.WriteString(" " + m.filter.View() + "\n")
+		}
+		var body string
+		switch m.screen {
+		case dashboard:
+			body = m.viewDashboard()
+		case runs:
+			body = m.runList.render("No runs yet. Press n to start one, or wait for a schedule.")
+		case trust:
+			body = m.viewTrust()
+		case detail:
+			body = m.view.View()
+		}
+		b.WriteString(clipLines(body, m.bodyHeight()))
 	}
-	b.WriteString("\n")
-	b.WriteString(m.footer())
-	return b.String()
+	out := b.String()
+	// Pin the footer to the last row whatever the body drew.
+	lines := strings.Count(out, "\n") + 1
+	if pad := m.height - 1 - lines; pad > 0 {
+		out += strings.Repeat("\n", pad)
+	}
+	return out + "\n" + m.footer()
 }
 
-func (m Model) header() string {
-	tabs := []string{"1 dashboard", "2 runs", "3 trust"}
-	cur := m.screen
-	if cur == detail || cur == pickJob {
-		cur = m.back
+func versionLabel(v string) string {
+	if v == "" || v == "dev" {
+		return "dev build"
 	}
-	var parts []string
-	for i, t := range tabs {
-		if screen(i) == cur {
-			parts = append(parts, tabOn.Render(t))
-		} else {
-			parts = append(parts, tabOff.Render(t))
-		}
-	}
-	left := titleStyle.Render("MARSHAL") + "  " + strings.Join(parts, "  ")
+	return "v" + strings.TrimPrefix(v, "v")
+}
 
-	auto := lipgloss.NewStyle().Foreground(good).Render("autonomy on")
-	if !m.status.Autonomy {
-		auto = lipgloss.NewStyle().Foreground(warn).Render("autonomy OFF")
+// clipLines keeps the first n lines so a body can never push the footer off
+// the screen.
+func clipLines(s string, n int) string {
+	lines := strings.Split(s, "\n")
+	if len(lines) <= n {
+		return s
 	}
-	daemon := dimStyle.Render(m.status.Version)
-	if m.srcErr != "" {
-		daemon = lipgloss.NewStyle().Foreground(bad).Render("source: " + m.srcErr)
+	return strings.Join(lines[:n], "\n")
+}
+
+// header is the banner (or a one-line title) with the status line.
+func (m Model) header() string {
+	status := m.statusLine()
+	if showBanner(m.width, m.height) {
+		return renderBanner(m.width) + "\n" + m.alignRight(sDim.Render(versionLabel(m.version)), status)
 	}
-	right := fmt.Sprintf("%s · %d running · $%.2f/24h · %s", auto, len(m.status.Running), m.status.Spend24h, daemon)
+	return m.alignRight(sTitle.Render(" MARSHAL ")+sTagline.Render(tagline), status)
+}
+
+func (m Model) alignRight(left, right string) string {
 	gap := m.width - lipgloss.Width(left) - lipgloss.Width(right) - 2
 	if gap < 1 {
-		gap = 1
+		return " " + left + "\n " + right
 	}
 	return " " + left + strings.Repeat(" ", gap) + right
 }
 
-func (m Model) footer() string {
-	if m.confirmAutonomy {
-		word := "OFF"
-		if !m.status.Autonomy {
-			word = "ON"
-		}
-		return " " + flashStyle.Render(fmt.Sprintf("turn autonomy %s? every auto-merge stops until it is back on. y/n", word))
+func (m Model) statusLine() string {
+	var parts []string
+	if m.srcErr != "" {
+		parts = append(parts, sBad.Render("⚠ "+m.srcErr))
+	} else if m.status.Version == "(no daemon)" {
+		parts = append(parts, sWarn.Render("○ no daemon"))
+	} else {
+		parts = append(parts, sGood.Render("● daemon"))
 	}
-	if m.flash != "" && time.Since(m.flashT) < 6*time.Second {
-		return " " + flashStyle.Render(m.flash)
+	if m.status.Autonomy {
+		parts = append(parts, sGood.Render("autonomy on"))
+	} else {
+		parts = append(parts, sWarn.Render("autonomy OFF"))
 	}
-	var keys string
-	switch m.screen {
-	case dashboard:
-		keys = "j/k select · enter/n new run · a autonomy · r refresh · q quit · ? help"
-	case runs:
-		keys = "j/k select · enter open · n new run · a autonomy · q quit"
-	case trust:
-		keys = "j/k scroll · a autonomy · q quit"
-	case detail:
-		keys = "j/k scroll · f follow · g/G top/bottom · esc back"
-	case pickJob:
-		keys = "h/l repo · j/k job · enter start · esc cancel"
+	if n := len(m.status.Running); n > 0 {
+		parts = append(parts, sGood.Render(fmt.Sprintf("%s %d running", m.spin.View(), n)))
+	} else {
+		parts = append(parts, sDim.Render("idle"))
 	}
-	return " " + dimStyle.Render(keys)
+	parts = append(parts, sDim.Render(fmt.Sprintf("$%.2f / 24h", m.status.Spend24h)))
+	return strings.Join(parts, sFaint.Render("  │  "))
 }
+
+func (m Model) tabs() string {
+	names := []string{"dashboard", "runs", "trust"}
+	cur := m.screen
+	if cur == detail {
+		cur = runs
+	}
+	var out []string
+	for i, n := range names {
+		label := fmt.Sprintf("%d %s", i+1, n)
+		if i == 1 && len(m.status.Running) > 0 {
+			label += " " + m.spin.View()
+		}
+		if screen(i) == cur {
+			out = append(out, sTabOn.Render(label))
+		} else {
+			out = append(out, sTabOff.Render(label))
+		}
+	}
+	line := " " + strings.Join(out, " ")
+	if m.screen == detail {
+		line += sDim.Render(" › run " + m.run.ID)
+	}
+	return line
+}
+
+func (m Model) footer() string {
+	if m.flash != "" && time.Since(m.flashT) < 6*time.Second {
+		style := sWarn
+		if strings.HasPrefix(m.flash, "✓") {
+			style = sGood
+		}
+		if strings.HasPrefix(m.flash, "✗") {
+			style = sBad
+		}
+		return " " + style.Render(m.flash)
+	}
+	var keys [][2]string
+	switch {
+	case m.modal == modalPick:
+		keys = [][2]string{{"h/l", "repo"}, {"j/k", "job"}, {"enter", "start"}, {"esc", "cancel"}}
+	case m.modal == modalAutonomy:
+		keys = [][2]string{{"y", "yes"}, {"n", "no"}}
+	case m.modal == modalHelp:
+		keys = [][2]string{{"any key", "close"}}
+	case m.filtering:
+		keys = [][2]string{{"type", "filter"}, {"enter", "keep"}, {"esc", "clear"}}
+	case m.screen == dashboard:
+		keys = [][2]string{{"j/k", "repo"}, {"enter", "start job"}, {"o", "its runs"}, {"a", "autonomy"}, {"?", "help"}, {"q", "quit"}}
+	case m.screen == runs:
+		keys = [][2]string{{"j/k", "move"}, {"enter", "open"}, {"/", "filter"}, {"o", "open PR"}, {"n", "new run"}, {"?", "help"}, {"q", "quit"}}
+	case m.screen == trust:
+		keys = [][2]string{{"j/k", "move"}, {"a", "autonomy"}, {"?", "help"}, {"q", "quit"}}
+	case m.screen == detail:
+		keys = [][2]string{{"j/k", "scroll"}, {"f", "follow"}, {"g/G", "top/end"}, {"o", "open PR"}, {"esc", "back"}}
+	}
+	var parts []string
+	for _, k := range keys {
+		parts = append(parts, sKey.Render(k[0])+" "+sDim.Render(k[1]))
+	}
+	return " " + strings.Join(parts, sFaint.Render("  ·  "))
+}
+
+// dashboard
 
 func (m Model) viewDashboard() string {
 	if len(m.fleet.Repos) == 0 {
-		return dimStyle.Render("  no repositories in the fleet file")
+		return sDim.Render("  No repositories in the fleet file. Add some and run `marshal check`.")
 	}
 	trustByRepo := map[string][]store.Trust{}
 	for _, t := range m.trust {
@@ -120,6 +179,7 @@ func (m Model) viewDashboard() string {
 	last := map[string]store.Run{}
 	open := map[string]int{}
 	running := map[string]bool{}
+	spend := map[string]float64{}
 	for _, r := range m.runs {
 		if _, ok := last[r.Repo]; !ok {
 			last[r.Repo] = r // runs are newest first
@@ -130,132 +190,212 @@ func (m Model) viewDashboard() string {
 		if r.Status == store.Running {
 			running[r.Repo] = true
 		}
+		if time.Since(r.StartedAt) < 7*24*time.Hour {
+			spend[r.Repo] += r.CostUSD
+		}
 	}
-	cardW := (m.width - 4) / 2
-	if cardW < 36 || len(m.fleet.Repos) == 1 {
-		cardW = m.width - 4
+	cols := 1
+	cardW := m.width - 4
+	if m.width >= 100 && len(m.fleet.Repos) > 1 {
+		cols = 2
+		cardW = (m.width-5)/2 - 2
 	}
 	var cards []string
 	for i, repo := range m.fleet.Repos {
 		var b strings.Builder
-		name := titleStyle.Render(repo.Name)
+		name := sTitle.Render(repo.Name)
 		if running[repo.Name] {
-			name += lipgloss.NewStyle().Foreground(good).Render("  ● running")
+			name += "  " + sGood.Render(m.spin.View()+" running")
 		}
 		b.WriteString(name + "\n")
-		b.WriteString(dimStyle.Render(repo.URL) + "\n")
+		b.WriteString(sDim.Render(repo.URL) + "\n\n")
+		row := func(k, v string) { b.WriteString(sDim.Render(fmt.Sprintf("%-9s", k)) + v + "\n") }
 		if r, ok := last[repo.Name]; ok {
-			b.WriteString(fmt.Sprintf("last run  %s %s %s", r.Job, statusStyle(r.Status).Render(string(r.Status)), dimStyle.Render(ago(r.StartedAt))))
+			row("last run", fmt.Sprintf("%s  %s  %s", statusCell(r.Status, m.spin.View()), r.Job, sDim.Render(ago(r.StartedAt))))
 		} else {
-			b.WriteString(dimStyle.Render("last run  never"))
+			row("last run", sDim.Render("never"))
 		}
-		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("open PRs  %d    jobs  %s\n", open[repo.Name], strings.Join(repo.Jobs, ", ")))
-		var levels []string
+		openStr := sDim.Render("none")
+		if open[repo.Name] > 0 {
+			openStr = sWarn.Render(fmt.Sprintf("%d waiting", open[repo.Name]))
+		}
+		row("open PRs", openStr)
+		row("jobs", strings.Join(repo.Jobs, ", "))
+		row("7d spend", fmt.Sprintf("$%.2f", spend[repo.Name]))
+		var pills []string
 		for _, t := range trustByRepo[repo.Name] {
-			levels = append(levels, t.Class+":"+levelStyle(t.Level).Render(t.Level))
+			pills = append(pills, sDim.Render(t.Class+" ")+levelPill(t.Level))
 		}
-		if len(levels) > 0 {
-			b.WriteString("trust     " + strings.Join(levels, "  "))
+		if len(pills) > 0 {
+			row("trust", strings.Join(pills, "  "))
 		}
-		style := cardStyle
+		style := sCard
 		if i == m.repoCursor {
-			style = cardOn
+			style = sCardOn
 		}
-		cards = append(cards, style.Width(cardW).Render(b.String()))
+		cards = append(cards, style.Width(cardW).Render(strings.TrimRight(b.String(), "\n")))
 	}
-	if cardW == m.width-4 {
-		return lipgloss.JoinVertical(lipgloss.Left, cards...)
-	}
+	// Lay cards out in rows, then scroll the rows so the selected card is
+	// always on screen. A fleet of twenty repos on a laptop screen must still
+	// be navigable with j/k alone.
 	var rows []string
-	for i := 0; i < len(cards); i += 2 {
-		if i+1 < len(cards) {
-			rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, cards[i], " ", cards[i+1]))
-		} else {
-			rows = append(rows, cards[i])
+	selRow := m.repoCursor / cols
+	for i := 0; i < len(cards); i += cols {
+		parts := []string{" ", cards[i]}
+		if cols == 2 && i+1 < len(cards) {
+			parts = append(parts, " ", cards[i+1])
 		}
+		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, parts...))
 	}
-	return lipgloss.JoinVertical(lipgloss.Left, rows...)
+	limit := m.bodyHeight()
+	start := 0
+	for {
+		h := 0
+		for r := start; r <= selRow; r++ {
+			h += lipgloss.Height(rows[r])
+		}
+		if h <= limit || start >= selRow {
+			break
+		}
+		start++
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rows[start:]...)
 }
 
-func (m Model) viewPick() string {
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("  start a job on %s\n\n", titleStyle.Render(m.pickRepo.Name)))
-	for i, jn := range m.pickRepo.Jobs {
-		j, _ := m.fleet.Job(jn)
-		cur := "  "
-		if i == m.pickIdx {
-			cur = lipgloss.NewStyle().Foreground(accent).Render("> ")
-		}
-		b.WriteString(fmt.Sprintf("  %s%-16s %s\n", cur, jn, dimStyle.Render(j.Description)))
-	}
-	if m.status.Version == "(no daemon)" {
-		b.WriteString("\n  " + flashStyle.Render("no daemon is running; starting a job needs `marshal serve`"))
-	}
-	return b.String()
+// trust
+
+func (m Model) viewTrust() string {
+	legend := " " + sDim.Render("levels  ") +
+		levelPill("locked") + sDim.Render(" never proposed   ") +
+		levelPill("review") + sDim.Render(" waits for you   ") +
+		levelPill("soak") + sDim.Render(" merges after a quiet window   ") +
+		levelPill("auto") + sDim.Render(" merges when green")
+	l := m.trustList
+	l.height = max(m.trustList.height-2, 3)
+	return l.render("No repos with jobs yet.") + "\n\n" + legend
 }
+
+// detail
 
 func (m Model) renderDetail() string {
 	r := m.run
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("%s  %s on %s  ·  class %s  ·  %s\n", titleStyle.Render("run "+r.ID), r.Job, r.Repo, r.Class, r.Model))
-	line := fmt.Sprintf("%s  %d turns  $%.2f  started %s", statusStyle(r.Status).Render(string(r.Status)), r.Turns, r.CostUSD, r.StartedAt.Format("Jan 2 15:04"))
+	b.WriteString(fmt.Sprintf(" %s  %s %s %s  %s %s\n", sTitle.Render("run "+r.ID), sDim.Render("job"), r.Job, sDim.Render("on "+r.Repo), sDim.Render("class"), r.Class))
+	meta := []string{statusCell(r.Status, m.spin.View()), fmt.Sprintf("%d turns", r.Turns), fmt.Sprintf("$%.2f", r.CostUSD), r.Model}
+	if !r.StartedAt.IsZero() {
+		meta = append(meta, "started "+r.StartedAt.Format("Jan 2 15:04"))
+	}
 	if !r.FinishedAt.IsZero() {
-		line += "  took " + r.FinishedAt.Sub(r.StartedAt).Round(time.Second).String()
+		meta = append(meta, "took "+r.FinishedAt.Sub(r.StartedAt).Round(time.Second).String())
 	}
+	b.WriteString(" " + strings.Join(meta, sFaint.Render("  ·  ")) + "\n")
 	if r.PRURL != "" {
-		line += "  " + r.PRURL
+		b.WriteString(" " + sDim.Render("pr ") + r.PRURL + "\n")
 	}
-	b.WriteString(line + "\n")
 	if r.Error != "" {
-		b.WriteString(lipgloss.NewStyle().Foreground(bad).Render(r.Error) + "\n")
+		b.WriteString(" " + sBad.Render(strings.ReplaceAll(r.Error, "\n", "\n ")) + "\n")
 	}
-	b.WriteString("\n")
+	b.WriteString(" " + sRule.Render(strings.Repeat("─", max(m.width-4, 10))) + "\n")
 	for _, e := range m.events {
-		kind := e.Kind
-		switch kind {
+		var kind string
+		switch e.Kind {
 		case "tool":
-			kind = dimStyle.Render("tool   ")
+			kind = sDim.Render("tool   ")
 		case "denied", "blocked":
-			kind = lipgloss.NewStyle().Foreground(bad).Render(fmt.Sprintf("%-7s", kind))
+			kind = sBad.Render(fmt.Sprintf("%-7s", e.Kind))
 		case "text":
 			kind = lipgloss.NewStyle().Foreground(accent).Render("text   ")
 		default:
-			kind = dimStyle.Render(fmt.Sprintf("%-7s", kind))
+			kind = sFaint.Render(fmt.Sprintf("%-7s", e.Kind))
 		}
 		text := e.Text
-		if e.Kind == "text" && strings.Contains(text, "\n") {
-			text = strings.ReplaceAll(text, "\n", "\n                 ")
+		if e.Kind == "text" {
+			// The final text is the report, rendered in full below; in the
+			// stream show its first line only so the tool calls stay dense.
+			text, _, _ = strings.Cut(text, "\n")
+			if text == "" {
+				text = "…"
+			}
 		}
-		b.WriteString(fmt.Sprintf("%s %s %s\n", dimStyle.Render(e.At.Format("15:04:05")), kind, text))
+		b.WriteString(fmt.Sprintf(" %s %s %s\n", sFaint.Render(e.At.Format("15:04:05")), kind, text))
 	}
 	if r.Summary != "" && r.Status != store.Running {
-		b.WriteString("\n" + dimStyle.Render(strings.Repeat("─", 40)) + "\n")
-		b.WriteString(r.Summary + "\n")
+		b.WriteString(" " + sRule.Render(strings.Repeat("─", max(m.width-4, 10))) + "\n")
+		b.WriteString(" " + sHeader.Render("REPORT") + "\n")
+		b.WriteString(renderMarkdown(r.Summary, m.width))
 	}
 	return b.String()
 }
 
-func statusStyle(s store.Status) lipgloss.Style {
-	switch s {
-	case store.Merged, store.Proposed, store.Committed:
-		return lipgloss.NewStyle().Foreground(good)
-	case store.Running:
-		return lipgloss.NewStyle().Foreground(accent)
-	case store.Failed, store.Blocked, store.Rejected:
-		return lipgloss.NewStyle().Foreground(bad)
+// modals
+
+func (m Model) renderModal() string {
+	var content string
+	switch m.modal {
+	case modalAutonomy:
+		word := sBad.Render("OFF")
+		detail := "Every automatic merge stops until it is turned back on.\nProposals keep being opened; they just wait for you."
+		if !m.status.Autonomy {
+			word = sGood.Render("ON")
+			detail = "Classes at soak or auto will merge their own PRs again,\nwhen CI is green and the gates pass."
+		}
+		content = sTitle.Render("Turn autonomy "+word+"?") + "\n\n" + detail + "\n\n" + sKey.Render("y") + sDim.Render(" yes    ") + sKey.Render("n") + sDim.Render(" no")
+	case modalPick:
+		var b strings.Builder
+		b.WriteString(sTitle.Render("Start a job") + "\n\n")
+		b.WriteString(sDim.Render("repo   "))
+		for i, r := range m.fleet.Repos {
+			if i == m.repoCursor {
+				b.WriteString(sTabOn.Render(r.Name))
+			} else {
+				b.WriteString(sTabOff.Render(r.Name))
+			}
+		}
+		b.WriteString("\n\n")
+		if len(m.pickRepo.Jobs) == 0 {
+			b.WriteString(sDim.Render("this repo has no jobs") + "\n")
+		}
+		for i, jn := range m.pickRepo.Jobs {
+			j, _ := m.fleet.Job(jn)
+			res := m.fleet.Resolve(j)
+			cur := "  "
+			name := jn
+			if i == m.pickIdx {
+				cur = sKey.Render("▶ ")
+				name = sTitle.Render(jn)
+			}
+			b.WriteString(fmt.Sprintf("%s%-16s %s\n", cur, name, sDim.Render(j.Description)))
+			b.WriteString(fmt.Sprintf("  %-16s %s\n", "", sFaint.Render(fmt.Sprintf("%s · %s · ≤%d turns · ≤$%.2f · class %s", res.Model, res.Effort, res.MaxTurns, res.MaxUSD, j.Class))))
+		}
+		if m.status.Version == "(no daemon)" {
+			b.WriteString("\n" + sWarn.Render("No daemon is running. Start one with `marshal serve`."))
+		}
+		content = strings.TrimRight(b.String(), "\n")
+	case modalHelp:
+		content = m.helpText()
 	}
-	return dimStyle
+	box := sModal.Render(content)
+	return lipgloss.Place(m.width, m.bodyHeight(), lipgloss.Center, lipgloss.Center, box)
 }
 
-func levelStyle(l string) lipgloss.Style {
-	switch l {
-	case "auto":
-		return lipgloss.NewStyle().Foreground(good)
-	case "soak":
-		return lipgloss.NewStyle().Foreground(warn)
-	case "locked":
-		return lipgloss.NewStyle().Foreground(bad)
+func (m Model) helpText() string {
+	row := func(k, v string) string { return fmt.Sprintf("  %s  %s", sKey.Render(fmt.Sprintf("%-11s", k)), v) }
+	sections := []struct {
+		title string
+		keys  [][2]string
+	}{
+		{"everywhere", [][2]string{{"1 2 3", "dashboard, runs, trust"}, {"tab / S-tab", "next, previous screen"}, {"n", "start a job"}, {"a", "autonomy on/off (asks first)"}, {"R", "refresh now"}, {"?", "this help"}, {"q / ctrl-c", "quit, or back from a run"}}},
+		{"dashboard", [][2]string{{"j k h l", "select repo"}, {"enter", "start a job on it"}, {"o", "show its runs"}}},
+		{"runs", [][2]string{{"j k g G", "move, top, bottom"}, {"pgup pgdn", "page"}, {"enter", "open the run"}, {"/", "filter · esc clears · backspace clears a kept filter"}, {"o", "open its PR in the browser"}}},
+		{"run", [][2]string{{"j k", "scroll"}, {"f", "follow the live stream"}, {"g G", "top, bottom"}, {"o", "open its PR"}, {"esc", "back to runs"}}},
 	}
-	return lipgloss.NewStyle()
+	var b strings.Builder
+	b.WriteString(sTitle.Render("Keys") + "\n")
+	for _, s := range sections {
+		b.WriteString("\n" + sHeader.Render(s.title) + "\n")
+		for _, k := range s.keys {
+			b.WriteString(row(k[0], k[1]) + "\n")
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
