@@ -227,6 +227,48 @@ func (a *App) Env(ctx context.Context, scope Scope) ([]string, error) {
 	}, nil
 }
 
+// Repositories lists the full names the installation can reach. It is the
+// one check that proves the install covers the fleet.
+func (a *App) Repositories(ctx context.Context) ([]string, error) {
+	tok, err := a.Token(ctx, ReadOnly)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for page := 1; page < 20; page++ {
+		req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/installation/repositories?per_page=100&page=%d", a.base(), page), nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		resp, err := a.http().Do(req)
+		if err != nil {
+			return nil, err
+		}
+		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("installation repositories: %s: %s", resp.Status, strings.TrimSpace(string(raw)))
+		}
+		var body struct {
+			Repositories []struct {
+				FullName string `json:"full_name"`
+			} `json:"repositories"`
+		}
+		if err := json.Unmarshal(raw, &body); err != nil {
+			return nil, err
+		}
+		for _, r := range body.Repositories {
+			out = append(out, r.FullName)
+		}
+		if len(body.Repositories) < 100 {
+			break
+		}
+	}
+	return out, nil
+}
+
 // Identity is how the app's commits are attributed, matching what GitHub
 // shows for an app's own commits so they link to the app.
 func (a *App) Identity() config.Identity {

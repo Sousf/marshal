@@ -67,6 +67,7 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
   marshal status                  is the daemon up, is autonomy on, what is running
   marshal autonomy on|off         the kill switch: off stops every auto-merge
   marshal app create [--name N]   create and install the MARSHAL GitHub App (two clicks in a browser)
+  marshal app status              which repositories the app installation can reach
   marshal version
 
 Files:
@@ -248,8 +249,38 @@ func ghClient(app *ghapp.App) github.Client {
 func client() api.Client { return api.Client{Path: socketPath()} }
 
 func cmdApp(ctx context.Context, f *config.Fleet, args []string) error {
+	if len(args) > 0 && args[0] == "status" {
+		app, err := auth(f)
+		if err != nil {
+			return err
+		}
+		if app == nil {
+			fmt.Println("no github_app configured; MARSHAL acts as your gh login")
+			return nil
+		}
+		repos, err := app.Repositories(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("app %s (id %d), installation %d, %d repositories reachable:\n", app.Slug, app.AppID, app.InstallationID, len(repos))
+		reach := map[string]bool{}
+		for _, r := range repos {
+			reach[strings.ToLower(r)] = true
+			fmt.Println("  " + r)
+		}
+		for _, r := range f.Repos {
+			slug := r.GitHub
+			if slug == "" {
+				slug, _ = github.Slug(r.URL)
+			}
+			if slug != "" && !reach[strings.ToLower(slug)] {
+				fmt.Printf("  ! fleet repo %s (%s) is not covered by the installation\n", r.Name, slug)
+			}
+		}
+		return nil
+	}
 	if len(args) == 0 || args[0] != "create" {
-		return errors.New("usage: marshal app create [--name <app-name>] [--homepage <url>]")
+		return errors.New("usage: marshal app create [--name <app-name>] [--homepage <url>] | marshal app status")
 	}
 	name, homepage := "", "https://github.com/Sousf/marshal"
 	for i := 1; i < len(args); i++ {
