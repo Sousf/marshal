@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.4 (2026-10-11)
+
+- Act on any reply to a MARSHAL PR, and always answer
+- Stop loading MCP servers into agent runs; prune old event logs (#12)
+
 ## v0.1.3 (2026-10-11)
 
 - Operator requests skip the PR cap; refusals reach the interface
