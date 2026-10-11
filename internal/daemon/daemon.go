@@ -1223,7 +1223,7 @@ func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) 
 // TriggerOpts is Trigger with the probe bypassed when force is set.
 func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) (string, error) {
 	d.init()
-	if _, ok := d.Fleet.Job(job); !ok {
+	if _, ok := d.Fleet.Job(job); !ok && job != run.BrewSetupJob {
 		return "", fmt.Errorf("unknown job %q", job)
 	}
 	if _, ok := d.Fleet.Repo(repo); !ok {
