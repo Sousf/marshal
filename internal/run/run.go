@@ -111,9 +111,10 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 		harnessEnv = append(append([]string{}, opts.Env...), full...)
 		agentEnv = append(append([]string{}, opts.Env...), ro...)
 		repo.URL = ghapp.CloneURL(repo)
-		if identity.Name == "" {
-			identity = x.Auth.Identity()
-		}
+		// The app's identity wins over the fleet's fallback one, so the
+		// commits link to the app the PR came from. The fallback is for
+		// running without an app.
+		identity = x.Auth.Identity()
 		logf("note", "acting as GitHub App %s", identity.Name)
 	}
 	ws, err := workspace.Prepare(ctx, x.workRoot(), repo, job.Name, rec.ID, identity, harnessEnv)
