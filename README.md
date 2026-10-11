@@ -87,9 +87,19 @@ Working today:
   read, search, web and write-to-scratch tools, no tokens, and leaves a
   report under `~/.local/share/marshal/reports` with a notification.
 
-Not yet: adapters for agents other than Claude Code, a review screen in the
-interface, a posture score per repository, a chat channel for dispatching
-tasks from a phone.
+- The contract. A repository may carry a `marshal.yaml` naming how it is
+  built and checked: `build`, `test`, `lint`, `vuln`, `format`, `smoke`,
+  each a command. With it, MARSHAL measures the clean tree before the agent
+  runs, puts the exact commands and the pre-existing state in the brief,
+  and refuses after the run any change that breaks a verb that passed
+  before. The verifier runs the same verbs and treats the results as facts
+  that outrank the model's account. `locked` paths add to MARSHAL's own
+  locked set; `sensitive` paths mark a proposal for human review whatever
+  the trust level. This repository carries one.
+
+Not yet: `marshal doctor` for contract conformance and a posture score,
+adapters for agents other than Claude Code, a review screen in the
+interface, a chat channel for dispatching tasks from a phone.
 
 ## Run it yourself
 
@@ -151,6 +161,26 @@ marshal verify <run-id> --comment    # and post it on the PR
 Set `policy.verifier.always: true` to have every proposal verified and
 commented, whatever its trust level. It costs a verifier run per PR and
 makes your own review a read of the findings rather than of the diff.
+
+### Giving a repository a contract
+
+```yaml
+# marshal.yaml at the repository root
+contract: 1
+verbs:
+  build:  go build ./...
+  test:   go test ./...
+  lint:   go vet ./...
+  vuln:   govulncheck ./...
+  format: test -z "$(gofmt -l .)"
+  smoke:  ./bin/app --version
+locked:    [deploy/**]
+sensitive: [internal/auth/**]
+```
+
+Every verb is optional and runs through `sh` in the checkout with
+credentials scrubbed from the environment. A verb whose program is not
+installed is reported as unavailable, not failed.
 
 ### Adding a repository
 

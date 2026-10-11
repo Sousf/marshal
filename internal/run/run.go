@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/contract"
 	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
@@ -158,7 +159,11 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		defer logf("note", "work tree kept at %s", ws.Dir)
 	}
 
+	con, baseline := x.baseline(ctx, ws.Dir, logf)
 	prompt := brief
+	if c := con.Brief(baseline); c != "" {
+		prompt += "\n" + c
+	}
 	if h := History(ctx, x.Store, repo.Name, job.Name); h != "" {
 		prompt += "\n" + h
 	}
@@ -218,7 +223,11 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		return finish(store.Failed, err.Error())
 	}
 	changes := policy.ParseNumstat(numstat)
-	if v := policy.Check(job, changes); len(v) > 0 {
+	var extraLocked []string
+	if con != nil {
+		extraLocked = con.Locked
+	}
+	if v := policy.CheckWith(job, extraLocked, changes); len(v) > 0 {
 		var b strings.Builder
 		for _, x := range v {
 			b.WriteString(x.String())
@@ -228,9 +237,19 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		return finish(store.Blocked, strings.TrimSpace(b.String()))
 	}
 	logf("note", "policy ok: %d files", len(changes))
+	gate, regressions := x.gate(ctx, con, baseline, ws.Dir, logf)
+	if len(regressions) > 0 {
+		return finish(store.Blocked, "gate: the change breaks what passed before:\n"+contract.Summary(regressions)+"\n"+contract.Failures(regressions, 2000))
+	}
+	if con != nil {
+		if touched := policy.Touches(con.Sensitive, changes); len(touched) > 0 {
+			rec.Sensitive = true
+			logf("note", "touches sensitive paths (%s); a human must review", strings.Join(touched, ", "))
+		}
+	}
 
 	title, body := splitReport(result.Output, job.Name)
-	body = body + trailer(rec, result)
+	body = body + gateSection(baseline, gate) + trailer(rec, result)
 	if err := ws.Commit(ctx, title+"\n\n"+body); err != nil {
 		return finish(store.Failed, err.Error())
 	}
@@ -241,7 +260,11 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 	if err := ws.Push(ctx); err != nil {
 		return finish(store.Failed, err.Error())
 	}
-	url, err := ws.OpenPR(ctx, title, body, []string{Label, Label + ":" + job.Class})
+	labels := []string{Label, Label + ":" + job.Class}
+	if rec.Sensitive {
+		labels = append(labels, Label+":sensitive")
+	}
+	url, err := ws.OpenPR(ctx, title, body, labels)
 	if err != nil {
 		return finish(store.Failed, err.Error())
 	}
@@ -324,8 +347,12 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 		defer ws.Remove()
 	}
 
+	con, baseline := x.baseline(ctx, ws.Dir, logf)
 	var b strings.Builder
 	b.WriteString(brief)
+	if c := con.Brief(baseline); c != "" {
+		b.WriteString("\n" + c)
+	}
 	fmt.Fprintf(&b, "\n## The pull request\n\n%s\n\nOriginal job `%s`: %s\n\nTitle: %s\n\n<pr-body>\n%s\n</pr-body>\n", parent.PRURL, job.Name, job.Description, pr.Title, strings.TrimSpace(pr.Body))
 	mem := x.openMemory(ctx, rec.ID, identity, harnessEnv, logf)
 	defer mem.close()
@@ -390,11 +417,15 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	changes := policy.ParseNumstat(numstat)
 	// A follow-up fixes whatever the checks or the reviewer pointed at,
 	// which is often code the original job was confined away from. The
-	// job's path list does not apply to it; the always-locked set and the
-	// size cap still do, and the verifier reads the whole diff.
+	// job's path list does not apply to it; the locked set and the size
+	// cap still do, and the verifier reads the whole diff.
 	fixJob := job
 	fixJob.Paths = nil
-	if v := policy.Check(fixJob, changes); len(v) > 0 {
+	var extraLocked []string
+	if con != nil {
+		extraLocked = con.Locked
+	}
+	if v := policy.CheckWith(fixJob, extraLocked, changes); len(v) > 0 {
 		var vb strings.Builder
 		for _, x := range v {
 			vb.WriteString(x.String() + "\n")
@@ -402,8 +433,15 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 		}
 		return finish(store.Blocked, strings.TrimSpace(vb.String()))
 	}
+	gate, regressions := x.gate(ctx, con, baseline, ws.Dir, logf)
+	if len(regressions) > 0 {
+		return finish(store.Blocked, "gate: the fix breaks what passed before:\n"+contract.Summary(regressions)+"\n"+contract.Failures(regressions, 2000))
+	}
+	if con != nil && len(policy.Touches(con.Sensitive, changes)) > 0 {
+		rec.Sensitive = true
+	}
 	title, body := splitReport(result.Output, kind)
-	if err := ws.Commit(ctx, title+"\n\n"+body+trailer(rec, result)); err != nil {
+	if err := ws.Commit(ctx, title+"\n\n"+body+gateSection(baseline, gate)+trailer(rec, result)); err != nil {
 		return finish(store.Failed, err.Error())
 	}
 	if opts.NoPR {
@@ -415,6 +453,62 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	}
 	logf("note", "pushed fix to %s", ws.Branch)
 	return finish(store.Pushed, "")
+}
+
+// baseline loads the repository's contract and measures the clean tree with
+// the gate verbs, so a later failure can be told apart from one that was
+// already there.
+func (x *Executor) baseline(ctx context.Context, dir string, logf func(kind, format string, args ...any)) (*contract.Contract, []contract.Result) {
+	con, ok, err := contract.Load(dir)
+	if err != nil {
+		logf("note", "contract: %v (ignored)", err)
+		return nil, nil
+	}
+	if !ok {
+		return nil, nil
+	}
+	results := con.RunAll(ctx, dir, contract.Gate...)
+	for _, r := range results {
+		logf("note", "baseline %s", r)
+	}
+	return con, results
+}
+
+// gate re-runs the gate verbs after the agent and returns the results and
+// the regressions among them.
+func (x *Executor) gate(ctx context.Context, con *contract.Contract, baseline []contract.Result, dir string, logf func(kind, format string, args ...any)) ([]contract.Result, []contract.Result) {
+	if con == nil {
+		return nil, nil
+	}
+	after := con.RunAll(ctx, dir, contract.Gate...)
+	for _, r := range after {
+		logf("note", "gate %s", r)
+	}
+	reg := contract.Regressions(baseline, after)
+	for _, r := range reg {
+		logf("blocked", "gate: %s passed before this change and fails now", r.Verb)
+	}
+	return after, reg
+}
+
+// gateSection renders the contract results for a PR body.
+func gateSection(before, after []contract.Result) string {
+	if len(after) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n\n**Contract checks** (run by MARSHAL, not by the agent)\n\n")
+	b.WriteString(contract.Summary(after))
+	var pre []string
+	for _, r := range before {
+		if !r.OK && !r.Unavailable {
+			pre = append(pre, r.Verb)
+		}
+	}
+	if len(pre) > 0 {
+		fmt.Fprintf(&b, "\nAlready failing before this change: %s.\n", strings.Join(pre, ", "))
+	}
+	return b.String()
 }
 
 // recordLessons writes the report's lessons into the work tree's AGENTS.md

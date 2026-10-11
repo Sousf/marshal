@@ -70,6 +70,9 @@ type Run struct {
 	// or the watch window has passed.
 	MergeSHA string
 	Settled  bool
+	// Sensitive is set when the diff touched a path the repo's contract
+	// marks sensitive; such a proposal never merges without a human.
+	Sensitive bool
 	// Summary is the agent's final report; the PR body.
 	Summary string
 	// Error explains Failed or Blocked.
@@ -206,6 +209,7 @@ func (s *Store) migrate() error {
 		`ALTER TABLE runs ADD COLUMN feedback TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN merge_sha TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN settled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE runs ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -249,8 +253,8 @@ func (s *Store) UpdateRun(ctx context.Context, r *Run) error {
 		fin = r.FinishedAt.Unix()
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=?, turns=?,
-		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=?, feedback=?, merge_sha=?, settled=? WHERE id=?`,
-		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.Feedback, r.MergeSHA, r.Settled, r.ID)
+		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=?, feedback=?, merge_sha=?, settled=?, sensitive=? WHERE id=?`,
+		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.Feedback, r.MergeSHA, r.Settled, r.Sensitive, r.ID)
 	if err != nil {
 		return err
 	}
@@ -274,14 +278,14 @@ func (s *Store) AppendEvent(ctx context.Context, runID string, e Event) error {
 var ErrNotFound = errors.New("not found")
 
 const runCols = `id, job, repo, class, adapter, model, status, started_at, finished_at,
-	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head, feedback, merge_sha, settled`
+	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head, feedback, merge_sha, settled, sensitive`
 
 func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var r Run
 	var started int64
 	var finished sql.NullInt64
 	err := sc.Scan(&r.ID, &r.Job, &r.Repo, &r.Class, &r.Adapter, &r.Model, &r.Status,
-		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead, &r.Feedback, &r.MergeSHA, &r.Settled)
+		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead, &r.Feedback, &r.MergeSHA, &r.Settled, &r.Sensitive)
 	if err != nil {
 		return r, err
 	}

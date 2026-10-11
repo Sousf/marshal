@@ -68,7 +68,7 @@ func TestDecide(t *testing.T) {
 		{"agent fail", answer{Verdict: Fail, TestsRan: true, TestsPassed: true}, Checks{}, Fail},
 		{"agent unsure", answer{Verdict: Unsure}, Checks{}, Unsure},
 		{"pass without tests", answer{Verdict: Pass, TestsRan: false}, Checks{}, Unsure},
-		{"pass with failing tests", answer{Verdict: Pass, TestsRan: true, TestsPassed: false}, Checks{}, Unsure},
+		{"pass with failing tests", answer{Verdict: Pass, TestsRan: true, TestsPassed: false}, Checks{}, Fail},
 		{"pass with high finding", answer{Verdict: Pass, TestsRan: true, TestsPassed: true, Findings: []Finding{{Severity: "high"}}}, Checks{}, Fail},
 		{"check overrides pass", ok, Checks{NewModules: []string{"x"}}, Fail},
 		{"empty verdict", answer{}, Checks{}, Unsure},
@@ -179,6 +179,50 @@ func TestVerifyEndToEnd(t *testing.T) {
 	var stored []Finding
 	if err := json.Unmarshal([]byte(res.Verdict.Findings), &stored); err != nil || len(stored) != 1 {
 		t.Errorf("findings json: %v %v", err, res.Verdict.Findings)
+	}
+}
+
+func TestVerifyRunsContractVerbs(t *testing.T) {
+	url, sha := origin(t)
+	// Add a contract on the proposal branch whose test verb fails.
+	git := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = url
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("checkout", "-q", "marshal/audit/r1")
+	os.WriteFile(filepath.Join(url, "marshal.yaml"), []byte("contract: 1\nverbs:\n  test: 'echo boom; false'\n"), 0o644)
+	git("add", ".")
+	git("commit", "-q", "-m", "contract")
+	sha = git("rev-parse", "HEAD")
+	git("checkout", "-q", "main")
+
+	// The agent claims PASS with passing tests; the harness knows better.
+	ad := &scripted{answer: `{"verdict":"PASS","summary":"fine","findings":[],"tests_ran":true,"tests_passed":true}`}
+	v := &Verifier{Fleet: fleet(t, url), Adapter: ad, WorkRoot: t.TempDir()}
+	res, err := v.Verify(context.Background(), store.Run{ID: "r1", Job: "audit", Repo: "x"}, github.PR{HeadRef: "marshal/audit/r1", HeadSHA: sha})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verdict.Verdict != Fail {
+		t.Errorf("verdict = %s, want FAIL from the failing contract verb", res.Verdict.Verdict)
+	}
+	if !strings.Contains(ad.req.Prompt, "Contract checks MARSHAL already ran") || !strings.Contains(ad.req.Prompt, "boom") {
+		t.Error("verb results should be in the brief")
+	}
+	found := false
+	for _, f := range res.Findings {
+		if f.Category == "verification" && f.Source == "check" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("findings = %+v", res.Findings)
 	}
 }
 

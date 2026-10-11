@@ -1,0 +1,15 @@
+# MARSHAL's own contract: how this repository is built and checked.
+contract: 1
+verbs:
+  build:  go build ./...
+  test:   go test ./...
+  lint:   go vet ./...
+  vuln:   govulncheck ./...
+  format: test -z "$(gofmt -l .)"
+  smoke:  go run . version
+locked:
+  - packaging/marshal.service
+sensitive:
+  - internal/ghapp/**
+  - internal/policy/**
+  - internal/verifier/**

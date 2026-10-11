@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/contract"
 	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
@@ -144,13 +145,25 @@ func (v *Verifier) Verify(ctx context.Context, run store.Run, pr github.PR) (Res
 		v.logf("verify %s: check: %s", run.ID, f.Detail)
 	}
 
+	// With a contract, the harness establishes the test facts itself.
+	var verbs []contract.Result
+	if con, ok, err := contract.Load(ws.Dir); err == nil && ok {
+		verbs = con.RunAll(ctx, ws.Dir, "build", "test", "lint", "vuln")
+		for _, r := range verbs {
+			v.logf("verify %s: contract %s", run.ID, r)
+		}
+	}
 	truncated := false
 	if len(patch) > cfg.MaxDiffBytes {
 		patch = patch[:cfg.MaxDiffBytes] + "\n[... diff truncated; read the files for the rest ...]\n"
 		truncated = true
 	}
 	brief, _ := jobs.Prompt("verify")
-	prompt := brief + "\n" + claim(job, pr, numstat, checks, truncated) + "\n## The diff\n\n```diff\n" + patch + "\n```\n"
+	prompt := brief + "\n" + claim(job, pr, numstat, checks, truncated)
+	if len(verbs) > 0 {
+		prompt += "## Contract checks MARSHAL already ran on this head\n\n" + contract.Summary(verbs) + "\n" + contract.Failures(verbs, 3000) + "These results are facts; you need not repeat them, but you may.\n\n"
+	}
+	prompt += "## The diff\n\n```diff\n" + patch + "\n```\n"
 
 	req := runner.Request{
 		Prompt:          prompt,
@@ -193,6 +206,26 @@ func (v *Verifier) Verify(ctx context.Context, run store.Run, pr github.PR) (Res
 		a.Findings[i].Source = "agent"
 	}
 	out.Findings = append(checks.Findings(), a.Findings...)
+	// Harness-run verbs outrank the model's account of the tests.
+	if len(verbs) > 0 {
+		ran, passed := false, true
+		for _, r := range verbs {
+			if r.Unavailable {
+				continue
+			}
+			if r.Verb == "test" || r.Verb == "build" {
+				ran = true
+			}
+			if !r.OK {
+				passed = false
+				out.Findings = append(out.Findings, Finding{Category: "verification", Severity: "high", Source: "check",
+					Detail: fmt.Sprintf("contract verb %s fails on this head: %s", r.Verb, firstLine(r.Output))})
+			}
+		}
+		if ran {
+			a.TestsRan, a.TestsPassed = true, passed
+		}
+	}
 	out.Verdict.Verdict = decide(a, checks)
 	out.Summary = strings.TrimSpace(a.Summary)
 	if b, err := json.Marshal(out.Findings); err == nil {
@@ -212,8 +245,11 @@ func decide(a answer, c Checks) string {
 	case Fail:
 		return Fail
 	case Pass:
-		if !a.TestsRan || !a.TestsPassed {
+		if !a.TestsRan {
 			return Unsure
+		}
+		if !a.TestsPassed {
+			return Fail
 		}
 		for _, f := range a.Findings {
 			if f.Severity == "high" {

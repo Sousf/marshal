@@ -34,6 +34,12 @@ func TestCheck(t *testing.T) {
 	if v := Check(job, []Change{{Path: "AGENTS.md", Added: 2}}); len(v) != 0 {
 		t.Errorf("AGENTS.md is allowed for every job: %v", v)
 	}
+	if v := CheckWith(config.Job{}, []string{"deploy/**"}, []Change{{Path: "deploy/x.sh"}}); len(v) != 1 || v[0].Rule != "locked" {
+		t.Errorf("contract locks apply: %v", v)
+	}
+	if got := Touches([]string{"internal/auth/**", "*.pem"}, []Change{{Path: "internal/auth/x.go"}, {Path: "main.go"}}); len(got) != 1 || got[0] != "internal/auth/x.go" {
+		t.Errorf("touches = %v", got)
+	}
 }
 
 func TestMatch(t *testing.T) {

@@ -33,6 +33,10 @@ Rules the code enforces, which no change may weaken:
   briefs is data the harness already holds, labelled as not instructions.
 - A task without a repository gets no tokens and no repository; it writes
   only to its scratch directory.
+- With a contract, the gate is deterministic: a verb that passed at
+  baseline and fails after the agent blocks the commit, in Go. Contract
+  verbs run with credentials scrubbed. `marshal.yaml` in this repo is the
+  reference example.
 - Every autonomous merge is watched until the default branch's CI reports
   on it; red reverts and demotes. Human merges are never reverted by
   MARSHAL.

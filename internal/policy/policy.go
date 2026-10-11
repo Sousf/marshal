@@ -60,12 +60,19 @@ var alwaysAllowed = []string{"AGENTS.md"}
 // Check returns every violation in the diff. An empty result means the diff
 // may be committed.
 func Check(job config.Job, changes []Change) []Violation {
+	return CheckWith(job, nil, changes)
+}
+
+// CheckWith is Check with extra locked patterns from the repository's own
+// contract. Contract locks only ever add to MARSHAL's set.
+func CheckWith(job config.Job, extraLocked []string, changes []Change) []Violation {
 	var out []Violation
 	total := 0
+	locked := append(append([]string{}, alwaysLocked...), extraLocked...)
 	for _, c := range changes {
 		total += c.Added + c.Removed
-		if m := matchAny(alwaysLocked, c.Path); m != "" {
-			out = append(out, Violation{Rule: "locked", Path: c.Path, Text: "matches always-locked pattern " + m})
+		if m := matchAny(locked, c.Path); m != "" {
+			out = append(out, Violation{Rule: "locked", Path: c.Path, Text: "matches locked pattern " + m})
 			continue
 		}
 		if matchAny(alwaysAllowed, c.Path) != "" {
@@ -77,6 +84,18 @@ func Check(job config.Job, changes []Change) []Violation {
 	}
 	if job.MaxDiffLines > 0 && total > job.MaxDiffLines {
 		out = append(out, Violation{Rule: "size", Text: fmt.Sprintf("%d changed lines, cap is %d", total, job.MaxDiffLines)})
+	}
+	return out
+}
+
+// Touches reports the changed paths matching any of the patterns, for the
+// contract's sensitive list.
+func Touches(patterns []string, changes []Change) []string {
+	var out []string
+	for _, c := range changes {
+		if matchAny(patterns, c.Path) != "" {
+			out = append(out, c.Path)
+		}
 	}
 	return out
 }

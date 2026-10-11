@@ -328,6 +328,8 @@ func (d *Daemon) mayMerge(ctx context.Context, ladder policy.Ladder, repo config
 		return "", "" // review or locked: nothing to log every tick
 	}
 	switch {
+	case r.Sensitive:
+		return "", "touches paths the repository's contract marks sensitive; a human must review"
 	case pr.Checks == "":
 		return "", "no CI checks on the PR; a repo without CI gets no autonomy"
 	case pr.Checks != "SUCCESS":
