@@ -22,7 +22,7 @@ import (
 
 // Request is one call to the daemon.
 type Request struct {
-	// Op is one of: status, runs, run, events, trigger, task, fix, autonomy, trust, verdict.
+	// Op is one of: status, runs, run, events, trigger, task, fix, autonomy, trust, verdict, log.
 	// For task, Value is the instruction, Repo optional, Job an optional name.
 	Op    string `json:"op"`
 	Repo  string `json:"repo,omitempty"`
@@ -61,6 +61,8 @@ type Response struct {
 	Verdict *store.Verdict `json:"verdict,omitempty"`
 	// ID is the run started by trigger.
 	ID string `json:"id,omitempty"`
+	// Text carries free text, such as the daemon's log tail.
+	Text string `json:"text,omitempty"`
 }
 
 // Fail builds an error response.

@@ -166,9 +166,35 @@ marshal trigger vuln-fix spotify-tui
 marshal autonomy off         # the kill switch
 ```
 
-To run it on an always-on host as a user service, see
-`packaging/marshal.service`. To look at it from your laptop, ssh in and run
-`marshal`; the daemon listens on a Unix socket, never a port.
+### Running the daemon elsewhere, controlling it from anywhere
+
+The daemon listens on a Unix socket, never a port, so remote control is an
+ssh tunnel to that socket and ssh keys are the authentication:
+
+```sh
+MARSHAL_HOST=hermes1 marshal            # the interface, against the daemon on hermes1
+MARSHAL_HOST=hermes1 marshal status
+MARSHAL_HOST=hermes1 marshal chat       # chat too; its commands go through the tunnel
+```
+
+Export `MARSHAL_HOST` in your shell and every command does this. One tunnel
+per process, closed on exit. `marshal logs -f` is the one thing that needs
+a real ssh session.
+
+To put the daemon on a host:
+
+```sh
+cd ~/dev/marshal
+marshal deploy hermes1 --dry-run        # the plan
+marshal stop                            # if a local daemon holds the history
+marshal deploy hermes1 --with-state     # binary, fleet file, app key, database, unit
+```
+
+It cross-compiles for linux/amd64, so Go is not needed on the host; `gh`
+and `claude` are, logged in as the service user, or pass
+`--env ANTHROPIC_API_KEY=...` to give the service its own key. The unit
+reads `~/.config/marshal/env` for secrets and needs `loginctl
+enable-linger` so it runs while you are logged out.
 
 ### Testing without spending
 

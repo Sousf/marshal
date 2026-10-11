@@ -31,6 +31,7 @@ import (
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
 	"github.com/Sousf/marshal/internal/notify"
+	"github.com/Sousf/marshal/internal/remote"
 	"github.com/Sousf/marshal/internal/run"
 	"github.com/Sousf/marshal/internal/runner"
 	"github.com/Sousf/marshal/internal/store"
@@ -79,13 +80,23 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
   marshal app status              which repositories the app installation can reach
   marshal version
 
+  marshal deploy <host> [--with-state] [--dry-run]
+                                  install MARSHAL as a systemd user service on another machine
+
 Files:
   fleet   ` + "$MARSHAL_CONFIG" + `  default ~/.config/marshal/fleet.yaml
   state   ` + "$MARSHAL_STATE" + `   default ~/.local/share/marshal (database, work trees, socket)
+
+Remote control:
+  ` + "MARSHAL_HOST=hermes1 marshal" + `   every command, the interface and chat included, reaches the
+                                  daemon on that host through an ssh tunnel to its socket
+  ` + "$MARSHAL_SOCKET" + `                 use this socket path instead of the state directory's
 `
 
 func main() {
-	if err := app(os.Args[1:]); err != nil {
+	err := app(os.Args[1:])
+	remote.CloseAll()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "marshal:", err)
 		os.Exit(1)
 	}
@@ -239,6 +250,8 @@ func app(args []string) error {
 		}
 		fmt.Println(text)
 		return nil
+	case "deploy":
+		return cmdDeploy(ctx, fleet, rest)
 	case "stop":
 		return cmdStop()
 	case "logs":
@@ -308,7 +321,12 @@ func cmdVerify(ctx context.Context, f *config.Fleet, args []string) error {
 	return nil
 }
 
-func socketPath() string { return filepath.Join(config.StateDir(), "marshal.sock") }
+func socketPath() string {
+	if p := os.Getenv("MARSHAL_SOCKET"); p != "" {
+		return p
+	}
+	return filepath.Join(config.StateDir(), "marshal.sock")
+}
 
 // auth loads the GitHub App when the fleet configures one. nil means act as
 // the host's gh login.
@@ -325,7 +343,26 @@ func ghClient(app *ghapp.App) github.Client {
 	return c
 }
 
-func client() api.Client { return api.Client{Path: socketPath()} }
+// client reaches the daemon: through an ssh tunnel when MARSHAL_HOST is
+// set, else the local socket. A tunnel that cannot be opened is fatal
+// rather than a silent fallback to local state that would be the wrong
+// machine's.
+func client() api.Client {
+	if remote.Host() != "" {
+		t, err := remote.Open(context.Background())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "marshal:", err)
+			os.Exit(1)
+		}
+		c := api.Client{Path: t.Local}
+		if !c.Up() {
+			fmt.Fprintf(os.Stderr, "marshal: ssh to %s works but no daemon answers on its socket; is `marshal serve` running there?\n", remote.Host())
+			os.Exit(1)
+		}
+		return c
+	}
+	return api.Client{Path: socketPath()}
+}
 
 func cmdApp(ctx context.Context, f *config.Fleet, args []string) error {
 	if len(args) > 0 && args[0] == "status" {
@@ -433,12 +470,93 @@ func cmdApp(ctx context.Context, f *config.Fleet, args []string) error {
 	return nil
 }
 
+func cmdDeploy(ctx context.Context, f *config.Fleet, args []string) error {
+	host, withState, dry := "", false, false
+	var env []string
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--with-state":
+			withState = true
+		case "--dry-run":
+			dry = true
+		case "--env":
+			if i+1 >= len(args) {
+				return errors.New("--env needs KEY=value")
+			}
+			env = append(env, args[i+1])
+			i++
+		default:
+			if strings.HasPrefix(args[i], "-") || host != "" {
+				return fmt.Errorf("usage: marshal deploy <host> [--with-state] [--env KEY=value]... [--dry-run]")
+			}
+			host = args[i]
+		}
+	}
+	if host == "" {
+		return errors.New("usage: marshal deploy <host> [--with-state] [--env KEY=value]... [--dry-run]")
+	}
+	src, err := sourceDir()
+	if err != nil {
+		return err
+	}
+	d := remote.Deploy{
+		Host:   host,
+		Source: src,
+		Fleet:  config.Path(),
+		Unit:   filepath.Join(src, "packaging", "marshal.service"),
+		Env:    env,
+		DryRun: dry,
+		Out:    os.Stdout,
+	}
+	if f.GitHubApp.PrivateKeyFile != "" {
+		key := f.GitHubApp.PrivateKeyFile
+		if strings.HasPrefix(key, "~/") {
+			key = filepath.Join(os.Getenv("HOME"), key[2:])
+		}
+		d.Key = key
+	}
+	if withState {
+		if client().Up() && !dry {
+			return errors.New("stop the local daemon before copying its state (marshal stop); two daemons on one history will fight over the same PRs")
+		}
+		d.DB = filepath.Join(config.StateDir(), "marshal.db")
+	}
+	if dry {
+		fmt.Printf("would deploy to %s:\n", host)
+	}
+	if err := d.Run(ctx); err != nil {
+		return err
+	}
+	if !dry {
+		fmt.Printf("\ndeployed. From any machine: MARSHAL_HOST=%s marshal\n", host)
+	}
+	return nil
+}
+
+// sourceDir finds the MARSHAL checkout to build from: the directory of a
+// go.mod declaring this module, starting from the working directory.
+func sourceDir() (string, error) {
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	for d := dir; ; d = filepath.Dir(d) {
+		if b, err := os.ReadFile(filepath.Join(d, "go.mod")); err == nil && strings.HasPrefix(string(b), "module github.com/Sousf/marshal") {
+			return d, nil
+		}
+		if filepath.Dir(d) == d {
+			return "", errors.New("run deploy from inside the MARSHAL source checkout, so it can build the binary")
+		}
+	}
+}
+
 func pidPath() string { return filepath.Join(config.StateDir(), "marshal.pid") }
 func logPath() string { return filepath.Join(config.StateDir(), "serve.log") }
 
 func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	tick := time.Minute
 	detach, noSchedule := false, false
+	logFile := ""
 	var passthrough []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -447,6 +565,12 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 		case "--no-schedule":
 			noSchedule = true
 			passthrough = append(passthrough, args[i])
+		case "--log-file":
+			if i+1 >= len(args) {
+				return errors.New("--log-file needs a path")
+			}
+			logFile = args[i+1]
+			i++
 		case "--tick":
 			if i+1 >= len(args) {
 				return errors.New("--tick needs a duration")
@@ -493,7 +617,7 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	} else {
 		logger.Printf("no notify channels configured; events go to this log only")
 	}
-	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule, Notify: n}
+	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule, Notify: n, LogPath: logFile}
 	if !d.Adapter.Available() {
 		logger.Printf("warning: %s is not on PATH; scheduled runs will fail until it is", "claude")
 	}
@@ -527,7 +651,7 @@ func detachServe(args []string) error {
 		return err
 	}
 	defer logf.Close()
-	cmd := exec.Command(self, append([]string{"serve"}, args...)...)
+	cmd := exec.Command(self, append([]string{"serve", "--log-file", logPath()}, args...)...)
 	cmd.Stdout = logf
 	cmd.Stderr = logf
 	cmd.Stdin = nil
@@ -602,6 +726,17 @@ func cmdStop() error {
 
 func cmdLogs(args []string) error {
 	follow := len(args) > 0 && (args[0] == "-f" || args[0] == "--follow")
+	if remote.Host() != "" {
+		if follow {
+			return errors.New("-f is not available over a tunnel; run `marshal logs` again, or ssh in and tail the file")
+		}
+		resp, err := client().Do(context.Background(), api.Request{Op: "log", Limit: 100})
+		if err != nil {
+			return err
+		}
+		fmt.Println(resp.Text)
+		return nil
+	}
 	if _, err := os.Stat(logPath()); err != nil {
 		return fmt.Errorf("no log at %s; the daemon was not started with --detach", logPath())
 	}
@@ -616,10 +751,14 @@ func cmdLogs(args []string) error {
 }
 
 // source picks the daemon when one answers, else the database directly.
+// With a remote host there is no sensible local fallback.
 func source(f *config.Fleet) (ui.Source, func(), error) {
 	c := client()
 	if c.Up() {
 		return ui.Daemon{Client: c}, func() {}, nil
+	}
+	if remote.Host() != "" {
+		return nil, nil, fmt.Errorf("no daemon answering on %s", remote.Host())
 	}
 	st, err := openStore()
 	if err != nil {

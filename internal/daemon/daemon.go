@@ -62,6 +62,8 @@ type Daemon struct {
 	NoSchedule bool
 	// Notify is where events go. nil is fine.
 	Notify *notify.Multi
+	// LogPath is the file the log goes to when detached, for the log op.
+	LogPath string
 
 	mu        sync.Mutex
 	running   map[string]string // repo -> run ID
@@ -1287,6 +1289,23 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 			return api.Fail("autonomy: want on or off")
 		}
 		return api.Response{Status: &api.Status{Autonomy: d.Autonomy(ctx)}}
+	case "log":
+		if d.LogPath == "" {
+			return api.Response{Text: "the daemon is logging to its terminal, not a file"}
+		}
+		b, err := os.ReadFile(d.LogPath)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+		n := req.Limit
+		if n <= 0 {
+			n = 100
+		}
+		if len(lines) > n {
+			lines = lines[len(lines)-n:]
+		}
+		return api.Response{Text: strings.Join(lines, "\n")}
 	case "verdict":
 		r, err := d.Store.GetRun(ctx, req.ID)
 		if err != nil {
