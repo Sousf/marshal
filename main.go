@@ -66,6 +66,7 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
   marshal trust                   where each repo and class sits on the ladder
   marshal status                  is the daemon up, is autonomy on, what is running
   marshal autonomy on|off         the kill switch: off stops every auto-merge
+  marshal app create [--name N]   create and install the MARSHAL GitHub App (two clicks in a browser)
   marshal version
 
 Files:
@@ -156,6 +157,8 @@ func app(args []string) error {
 		return cmdAutonomy(ctx, rest)
 	case "verify":
 		return cmdVerify(ctx, fleet, rest)
+	case "app":
+		return cmdApp(ctx, fleet, rest)
 	case "stop":
 		return cmdStop()
 	case "logs":
@@ -243,6 +246,82 @@ func ghClient(app *ghapp.App) github.Client {
 }
 
 func client() api.Client { return api.Client{Path: socketPath()} }
+
+func cmdApp(ctx context.Context, f *config.Fleet, args []string) error {
+	if len(args) == 0 || args[0] != "create" {
+		return errors.New("usage: marshal app create [--name <app-name>] [--homepage <url>]")
+	}
+	name, homepage := "", "https://github.com/Sousf/marshal"
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--name":
+			if i+1 >= len(args) {
+				return errors.New("--name needs a value")
+			}
+			name = args[i+1]
+			i++
+		case "--homepage":
+			if i+1 >= len(args) {
+				return errors.New("--homepage needs a value")
+			}
+			homepage = args[i+1]
+			i++
+		default:
+			return fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+	if f.GitHubApp.Set() && f.GitHubApp.InstallationID != 0 {
+		return fmt.Errorf("the fleet file already has github_app (app %d); remove it first to create another", f.GitHubApp.AppID)
+	}
+	if name == "" {
+		// App names are global on GitHub, so suffix with the login.
+		out, err := exec.CommandContext(ctx, "gh", "api", "user", "--jq", ".login").Output()
+		if err != nil {
+			return fmt.Errorf("could not read your GitHub login from gh; pass --name: %w", err)
+		}
+		name = "marshal-" + strings.ToLower(strings.TrimSpace(string(out)))
+	}
+	keyPath := filepath.Join(filepath.Dir(config.Path()), "marshal-app.pem")
+	fmt.Printf("creating GitHub App %q\nkey will be saved to %s\n\n", name, keyPath)
+
+	created, err := ghapp.Create(ctx, ghapp.CreateOptions{
+		Name: name, Homepage: homepage, KeyPath: keyPath, Out: os.Stdout,
+		Open: func(u string) {
+			fmt.Printf("opening %s\nif no browser appears, open that address yourself.\n\n", u)
+			_ = exec.Command("xdg-open", u).Start()
+		},
+	})
+	// Record whatever was achieved even on error, so a flow that stopped
+	// after creation does not strand the key and id.
+	if created.AppID != 0 {
+		g := config.GitHubApp{AppID: created.AppID, InstallationID: created.InstallationID, PrivateKeyFile: keyPath, Slug: created.Slug}
+		if werr := config.SetGitHubApp(config.Path(), g); werr != nil {
+			return fmt.Errorf("app created (id %d, slug %s) but fleet file not updated: %v", created.AppID, created.Slug, werr)
+		}
+		fmt.Printf("fleet file updated: %s\n", config.Path())
+	}
+	if err != nil {
+		if created.AppID != 0 && created.InstallationID == 0 {
+			return fmt.Errorf("app created but not installed: %v\ninstall it at %s/installations/new, then put the installation id from the resulting URL into the fleet file", err, created.HTMLURL)
+		}
+		return err
+	}
+	fmt.Printf("\nGitHub App %s is created and installed (app %d, installation %d).\n", created.Slug, created.AppID, created.InstallationID)
+	fmt.Println("checking that a token can be minted...")
+	fl, err := config.Load(config.Path())
+	if err != nil {
+		return err
+	}
+	app, err := ghapp.Load(fl.GitHubApp)
+	if err != nil {
+		return err
+	}
+	if _, err := app.Token(ctx, ghapp.ReadOnly); err != nil {
+		return err
+	}
+	fmt.Printf("ok. MARSHAL will now act as %s. Restart the daemon to pick it up.\n", app.Identity().Name)
+	return nil
+}
 
 func pidPath() string { return filepath.Join(config.StateDir(), "marshal.pid") }
 func logPath() string { return filepath.Join(config.StateDir(), "serve.log") }

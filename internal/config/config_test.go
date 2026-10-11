@@ -112,6 +112,33 @@ func TestValidation(t *testing.T) {
 	}
 }
 
+func TestSetGitHubApp(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fleet.yaml")
+	os.WriteFile(path, []byte(good+"\n# github_app:\n#   app_id: 1\n"), 0o600)
+	if err := SetGitHubApp(path, GitHubApp{AppID: 7, PrivateKeyFile: "~/k.pem", Slug: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	if !strings.Contains(string(b), "github_app:\n  app_id: 7\n  installation_id: 0\n  private_key_file: ~/k.pem\n  slug: m\n") {
+		t.Errorf("block not written:\n%s", b)
+	}
+	if !strings.Contains(string(b), "# github_app:") || !strings.Contains(string(b), "version: 1") {
+		t.Error("comments and the rest of the file must survive")
+	}
+	// Second write replaces the block rather than appending another.
+	if err := SetGitHubApp(path, GitHubApp{AppID: 7, InstallationID: 9, PrivateKeyFile: "~/k.pem", Slug: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(path)
+	if strings.Count(string(b), "\ngithub_app:") != 1 || !strings.Contains(string(b), "installation_id: 9") {
+		t.Errorf("block not replaced:\n%s", b)
+	}
+	if _, err := Load(path); err != nil {
+		t.Errorf("file must load: %v", err)
+	}
+}
+
 func TestPaths(t *testing.T) {
 	t.Setenv("MARSHAL_CONFIG", "/x/fleet.yaml")
 	t.Setenv("MARSHAL_STATE", "/y")

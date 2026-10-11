@@ -206,6 +206,54 @@ type Caps struct {
 	PRsPerRepoPerDay        int     `yaml:"prs_per_repo_per_day"`
 }
 
+// SetGitHubApp writes the github_app block into the fleet file at path,
+// replacing any existing uncommented block, and validates the result before
+// it replaces the file. Text-level on purpose: a YAML round trip would drop
+// the operator's comments.
+func SetGitHubApp(path string, g GitHubApp) error {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(b), "\n")
+	var kept []string
+	skipping := false
+	for _, l := range lines {
+		if strings.HasPrefix(l, "github_app:") {
+			skipping = true
+			continue
+		}
+		if skipping {
+			if l == "" || strings.HasPrefix(l, " ") || strings.HasPrefix(l, "\t") {
+				continue
+			}
+			skipping = false
+		}
+		kept = append(kept, l)
+	}
+	out := strings.TrimRight(strings.Join(kept, "\n"), "\n") + "\n\n"
+	out += "github_app:\n"
+	out += fmt.Sprintf("  app_id: %d\n", g.AppID)
+	out += fmt.Sprintf("  installation_id: %d\n", g.InstallationID)
+	out += fmt.Sprintf("  private_key_file: %s\n", g.PrivateKeyFile)
+	if g.Slug != "" {
+		out += fmt.Sprintf("  slug: %s\n", g.Slug)
+	}
+	// Validate everything but the all-or-nothing rule, since the
+	// installation id arrives in a second step.
+	var f Fleet
+	dec := yaml.NewDecoder(strings.NewReader(out))
+	dec.KnownFields(true)
+	if err := dec.Decode(&f); err != nil {
+		return fmt.Errorf("fleet file would not parse after edit: %w", err)
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(out), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Path returns the fleet file location: $MARSHAL_CONFIG, else
 // $XDG_CONFIG_HOME/marshal/fleet.yaml.
 func Path() string {
