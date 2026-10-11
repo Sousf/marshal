@@ -1,0 +1,73 @@
+# GoReleaser builds MARSHAL when the release workflow tags VERSION, publishes
+# a GitHub release, and updates the formula in Sousf/homebrew-tap.
+version: 2
+
+project_name: marshal
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: marshal
+    main: .
+    binary: marshal
+    env:
+      # Pure Go throughout, the SQLite driver included, so cross-compiling
+      # needs no C toolchain.
+      - CGO_ENABLED=0
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+
+archives:
+  - id: marshal
+    ids: [marshal]
+    formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - README.md
+      - SECURITY.md
+
+checksum:
+  name_template: checksums.txt
+
+# A formula rather than a cask so it installs on Linux, where the daemon
+# runs. Pushed over SSH with a deploy key that can write to homebrew-tap and
+# nothing else.
+brews:
+  - name: marshal
+    ids: [marshal]
+    repository:
+      owner: Sousf
+      name: homebrew-tap
+      branch: main
+      git:
+        url: git@github.com:Sousf/homebrew-tap.git
+        private_key: "{{ .Env.HOMEBREW_TAP_DEPLOY_KEY_PATH }}"
+    directory: Formula
+    homepage: https://github.com/Sousf/marshal
+    description: Agentic maintainer that keeps a fleet of repositories secure
+    commit_author:
+      name: goreleaser
+      email: noreply@github.com
+    install: |
+      bin.install "marshal"
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/marshal version")
+
+changelog:
+  disable: true # the release PR's notes are in CHANGELOG.md
+
+release:
+  footer: |
+    ## Install
+
+    ```sh
+    brew install Sousf/tap/marshal
+    ```
