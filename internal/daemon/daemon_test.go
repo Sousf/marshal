@@ -172,7 +172,7 @@ func (f *fakeAdapter) Run(_ context.Context, req runner.Request, emit func(runne
 	if f.fail != nil {
 		return runner.Result{IsError: true}, f.fail
 	}
-	if f.fix != nil && (strings.Contains(req.Prompt, "Fix failing checks") || strings.Contains(req.Prompt, "Address review feedback")) {
+	if f.fix != nil && (strings.Contains(req.Prompt, "Fix failing checks") || strings.Contains(req.Prompt, "Address feedback")) {
 		f.fix(req.Dir)
 		return runner.Result{Output: "Fix the test\n\nCorrected the assertion.", Turns: 2, CostUSD: 0.02}, nil
 	}
@@ -1213,4 +1213,51 @@ func TestOperatorRequestsSkipThePRCapAndRefusalsAreImmediate(t *testing.T) {
 		t.Errorf("operator task refused: %v", err)
 	}
 	wait(t, d)
+}
+
+func TestAnyReplyIsActedOnButApprovalIsNot(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{
+		"c": {State: "OPEN", Checks: "PENDING", Title: "T"}, // plain comment, no review state
+		"a": {State: "OPEN", Checks: "PENDING", Title: "T", Review: "APPROVED"},
+	}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.fix = func(wd string) { os.WriteFile(filepath.Join(wd, "done.txt"), []byte("ok\n"), 0o644) }
+	rc := proposalIn(t, d, gh, dir, "hardening", "c", time.Now().Add(-time.Hour))
+	ra := proposalIn(t, d, gh, dir, "hardening", "a", time.Now().Add(-time.Hour))
+	gh.humanComments = map[string][]github.Comment{
+		"c": {{Author: "pete", At: time.Now().Add(-time.Minute), Body: "also add a test", Where: "comment"}},
+		"a": {{Author: "pete", At: time.Now().Add(-time.Minute), Body: "LGTM", Where: "review approved"}},
+	}
+	settle(t, d)
+	wait(t, d)
+	settle(t, d)
+	wait(t, d)
+	if fu, _ := d.Store.Followups(ctx, rc.ID); len(fu) != 1 {
+		t.Errorf("a plain comment should start a follow-up: %+v", fu)
+	}
+	if fu, _ := d.Store.Followups(ctx, ra.ID); len(fu) != 0 {
+		t.Errorf("an approval is not a request: %+v", fu)
+	}
+	posted := strings.Join(gh.comments, "\n")
+	if !strings.Contains(posted, "MARSHAL addressed the review") {
+		t.Errorf("the reply should be posted:\n%s", posted)
+	}
+}
+
+func TestFollowupThatCannotStartSaysSo(t *testing.T) {
+	gh := &fakeGH{prs: map[string]github.PR{"s": {State: "OPEN", Checks: "PENDING", Title: "Skill: x"}}}
+	d, _ := newDaemon(t, gh)
+	r := &store.Run{Job: "skill", Repo: "x", Class: "hardening", Status: store.Proposed, StartedAt: time.Now().Add(-time.Hour)}
+	d.Store.CreateRun(context.Background(), r)
+	r.PRURL = "s"
+	d.Store.UpdateRun(context.Background(), r)
+	gh.humanComments = map[string][]github.Comment{"s": {{Author: "pete", At: time.Now(), Body: "tighten step 2", Where: "skills/x/SKILL.md"}}}
+	d.syncProposals(context.Background())
+	wait(t, d)
+	// This fleet has no memory repo, so a skill follow-up cannot run; the
+	// reviewer is told why rather than left waiting.
+	if posted := strings.Join(gh.comments, "\n"); !strings.Contains(posted, "MARSHAL could not act on this feedback") {
+		t.Errorf("no explanation posted:\n%s", posted)
+	}
 }

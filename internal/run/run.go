@@ -355,8 +355,18 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.Run, pr github.PR, extra string, opts Options) (store.Run, error) {
 	logs := extra
 	job, ok := x.Fleet.Job(parent.Job)
+	skillPR := false
 	if !ok {
-		return store.Run{}, fmt.Errorf("unknown job %q", parent.Job)
+		// A skill proposal is not a fleet job, but the reviewer may still
+		// ask for changes to it. The follow-up is confined to the skills
+		// directory and its result goes through skills.Check below.
+		_, dir, mem := x.Fleet.MemoryRepo()
+		if parent.Job != "skill" || !mem {
+			return store.Run{}, fmt.Errorf("unknown job %q", parent.Job)
+		}
+		job = config.Job{Name: "skill", Class: parent.Class, Paths: []string{dir + "/**"},
+			Description: "a proposed skill for MARSHAL's library: a reviewed procedure every future run on every repository reads"}
+		skillPR = true
 	}
 	repo, ok := x.Fleet.Repo(parent.Repo)
 	if !ok {
@@ -498,7 +508,9 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	// job's path list does not apply to it; the locked set and the size
 	// cap still do, and the verifier reads the whole diff.
 	fixJob := job
-	fixJob.Paths = nil
+	if !skillPR {
+		fixJob.Paths = nil
+	}
 	extraLocked := append([]string{}, x.Fleet.Never.Paths...)
 	if con != nil {
 		extraLocked = append(extraLocked, con.Locked...)
@@ -510,6 +522,12 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 			logf("blocked", "%s", x.String())
 		}
 		return finish(store.Blocked, strings.TrimSpace(vb.String()))
+	}
+	if skillPR {
+		if why := checkSkillFiles(ws.Dir, changes); why != "" {
+			logf("blocked", "%s", why)
+			return finish(store.Blocked, why)
+		}
 	}
 	if con != nil && len(policy.Touches(con.Sensitive, changes)) > 0 {
 		rec.Sensitive = true
@@ -918,4 +936,29 @@ func uniq(in []string) []string {
 func firstLine(s string) string {
 	s, _, _ = strings.Cut(strings.TrimSpace(s), "\n")
 	return s
+}
+
+// checkSkillFiles applies the skill content check to every SKILL.md a
+// follow-up changed, the same check a new proposal faces before its PR is
+// opened. It returns why the change is refused, or "".
+func checkSkillFiles(dir string, changes []policy.Change) string {
+	var why []string
+	for _, c := range changes {
+		if filepath.Base(c.Path) != "SKILL.md" {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, c.Path))
+		if err != nil {
+			continue // deleted
+		}
+		s, err := skills.Parse(c.Path, b)
+		if err != nil {
+			why = append(why, c.Path+": "+err.Error())
+			continue
+		}
+		for _, r := range skills.Check(s) {
+			why = append(why, c.Path+": "+r)
+		}
+	}
+	return strings.Join(why, "; ")
 }

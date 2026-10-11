@@ -46,8 +46,11 @@ Working today:
   verdict is bound to the head SHA, so a new push re-verifies.
 
 - Red checks on a MARSHAL PR start a follow-up run on the same branch with
-  the failing logs; a reviewer's "changes requested" starts one with the
-  comments. The fix is pushed to the PR and answered in a comment. Each
+  the failing logs; any reply from you short of an approval (a comment,
+  a review, an inline note) starts one with what you said, skill PRs
+  included. The fix is pushed to the PR and answered in a comment that
+  gives every point an outcome: done, not done and exactly why, or
+  answered. If no follow-up can run, the comment says why. Each
   failing head is attempted once, a few attempts per PR
   (`caps.check_fix_attempts`), then the PR is labelled for a human.
 - Learning. A run may end its report with `## Lessons`: facts about the
