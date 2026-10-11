@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.1 (2026-10-11)
+
+- brew-setup can be triggered on its own (#6)
+
 ## v0.1.0 (2026-10-11)
 
 - MIT licence
