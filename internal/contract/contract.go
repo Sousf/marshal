@@ -53,6 +53,10 @@ type Contract struct {
 	// because they configure a CI runner (sudo, system package managers),
 	// which MARSHAL never does to its own host.
 	HostSetup []string `yaml:"-"`
+	// Steps are the derived ci verb's workflow steps, in order. Run takes
+	// them one at a time, so a step whose program is not installed here is
+	// skipped instead of hiding every step after it.
+	Steps []string `yaml:"-"`
 }
 
 // Load reads the contract from a checkout: marshal.yaml when present, else
@@ -134,7 +138,56 @@ func (r Result) String() string {
 // Run executes one verb in dir with a bounded output tail. The command runs
 // through sh so a contract can use pipes and &&, as a developer would.
 func (c *Contract) Run(ctx context.Context, dir, verb string) Result {
-	cmd := c.Verbs[verb]
+	if verb == "ci" && len(c.Steps) > 0 {
+		return c.runSteps(ctx, dir)
+	}
+	return c.run(ctx, dir, verb, c.Verbs[verb])
+}
+
+// runSteps runs the derived ci steps as CI would, stopping at the first
+// failure. A step whose program is missing is noted and passed over; the
+// verb is unavailable only when every step was.
+func (c *Contract) runSteps(ctx context.Context, dir string) Result {
+	res := Result{Verb: "ci", Command: c.Verbs["ci"]}
+	var out strings.Builder
+	ran := 0
+	for _, step := range c.Steps {
+		r := c.run(ctx, dir, "ci", step)
+		res.Duration += r.Duration
+		switch {
+		case r.Unavailable:
+			fmt.Fprintf(&out, "[skipped, not installed here] %s\n", firstLine(step))
+			continue
+		case !r.OK:
+			fmt.Fprintf(&out, "[failed] %s\n%s\n", firstLine(step), r.Output)
+			res.Output = clipTail(out.String())
+			return res
+		}
+		ran++
+	}
+	res.OK = ran > 0
+	res.Unavailable = ran == 0
+	res.Output = clipTail(out.String())
+	return res
+}
+
+func firstLine(s string) string {
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i] + " ..."
+	}
+	return s
+}
+
+func clipTail(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > 16*1024 {
+		s = s[len(s)-16*1024:]
+	}
+	return s
+}
+
+func (c *Contract) run(ctx context.Context, dir, verb, cmd string) Result {
 	res := Result{Verb: verb, Command: cmd}
 	if strings.TrimSpace(cmd) == "" {
 		res.Unavailable = true
@@ -270,12 +323,17 @@ func scrub(env []string) []string {
 	for _, kv := range env {
 		k := strings.SplitN(kv, "=", 2)[0]
 		switch {
-		case k == "GH_TOKEN", k == "GITHUB_TOKEN", strings.HasPrefix(k, "GIT_CONFIG_"), strings.HasPrefix(k, "ANTHROPIC_"), strings.HasPrefix(k, "AWS_"):
+		case k == "GH_TOKEN", k == "GITHUB_TOKEN", strings.HasPrefix(k, "GIT_CONFIG"), strings.HasPrefix(k, "ANTHROPIC_"), strings.HasPrefix(k, "AWS_"),
+			strings.HasPrefix(k, "GIT_AUTHOR_"), strings.HasPrefix(k, "GIT_COMMITTER_"):
 			continue
 		}
 		out = append(out, kv)
 	}
-	return out
+	// Run as a CI runner would: no global or system git config, so no
+	// identity, aliases or hooks from the host. Tests that pass only on a
+	// machine with someone's git identity failed on GitHub this way while
+	// passing every local check.
+	return append(out, "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_CONFIG_NOSYSTEM=1")
 }
 
 type tail struct{ buf []byte }

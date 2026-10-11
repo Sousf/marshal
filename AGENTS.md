@@ -68,6 +68,10 @@ Rules the code enforces, which no change may weaken:
   FAIL that came from `Checks.Fatal` is downgraded to UNSURE first, so
   only a judgment closes a PR and a red flag goes to a human. MARSHAL
   approves only a PASS head with green checks.
+- Contract verbs run without the host's git config or identity
+  (`contract.scrub`), as on a CI runner; tests here do the same through
+  each package's `TestMain`. A derived `ci` verb runs its workflow steps
+  one at a time (`Contract.Steps`).
 - See `SECURITY.md`: in-process checks are heuristics; only OS isolation
   is a boundary. Do not describe an allowlist as one.
 - No autonomous merge without a PASS verdict bound to the PR's current head.

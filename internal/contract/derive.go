@@ -124,6 +124,7 @@ func Derive(dir string) (*Derived, bool, error) {
 	// The whole sequence, as CI would run it, is the ci verb; the classified
 	// verbs let probes and the gate talk about test, lint and vuln.
 	d.Verbs["ci"] = strings.Join(steps, " && ")
+	d.Steps = steps
 	if goVersion != "" {
 		d.Toolchain = toolchain(goVersion)
 		if d.Toolchain != "" {

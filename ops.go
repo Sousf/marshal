@@ -5,12 +5,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/Sousf/marshal/internal/api"
 	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/contract"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/runner"
 	"github.com/Sousf/marshal/internal/store"
@@ -179,5 +182,115 @@ func cmdTapKey(ctx context.Context, f *config.Fleet, args []string) error {
 		priv[i] = 0
 	}
 	fmt.Printf("%s can now push formulas to %s (deploy key %q, secret %s)\n", slug, tap, title, secret)
+	return nil
+}
+
+// hookMarker identifies a pre-push hook MARSHAL wrote, so it is never
+// confused with, or written over, one the operator wrote.
+const hookMarker = "# Installed by marshal preflight --install-hook"
+
+// cmdPreflight runs the repository's checks the way CI will, on a clean
+// copy of HEAD: the contract's gate verbs, or those derived from its pull
+// request workflows, without runner setup and without the host's git
+// config. A failure is an error, so a pre-push hook refuses the push.
+func cmdPreflight(ctx context.Context, args []string) error {
+	install := len(args) == 1 && args[0] == "--install-hook"
+	if len(args) > 1 || (len(args) == 1 && !install) {
+		return errors.New("usage: marshal preflight [--install-hook]")
+	}
+	git := func(dir string, a ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "git", a...)
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		return strings.TrimSpace(string(out)), err
+	}
+	root, err := git(".", "rev-parse", "--show-toplevel")
+	if err != nil {
+		return errors.New("not in a git repository")
+	}
+	if install {
+		return installHook(ctx, root)
+	}
+	head, err := git(root, "rev-parse", "--short", "HEAD")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.MkdirTemp("", "marshal-preflight-")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = git(root, "worktree", "remove", "--force", tmp)
+		os.RemoveAll(tmp)
+		_, _ = git(root, "worktree", "prune")
+	}()
+	if _, err := git(root, "worktree", "add", "--quiet", "--detach", tmp, "HEAD"); err != nil {
+		return fmt.Errorf("checking out HEAD: %w", err)
+	}
+	con, ok, err := contract.Load(tmp)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		fmt.Println("no marshal.yaml and no pull-request workflow: nothing to check")
+		return nil
+	}
+	src := "marshal.yaml"
+	if con.Derived {
+		src = "the pull-request workflows"
+	}
+	fmt.Printf("pre-flight on %s, checks from %s, as CI runs them\n", head, src)
+	for _, h := range con.HostSetup {
+		fmt.Printf("  skip  %s (runner setup)\n", h)
+	}
+	var results []contract.Result
+	for _, v := range contract.Gate {
+		if con.Verbs[v] == "" {
+			continue
+		}
+		r := con.Run(ctx, tmp, v)
+		results = append(results, r)
+		fmt.Printf("  %s\n", r)
+		for _, l := range strings.Split(r.Output, "\n") {
+			if strings.HasPrefix(l, "[skipped") {
+				fmt.Printf("        %s\n", l)
+			}
+		}
+	}
+	var failed []contract.Result
+	for _, r := range results {
+		if !r.OK && !r.Unavailable {
+			failed = append(failed, r)
+		}
+	}
+	if len(failed) > 0 {
+		fmt.Print("\n" + contract.Failures(failed, 6000))
+		return fmt.Errorf("pre-flight failed on %s: CI would fail too (git push --no-verify skips this once)", head)
+	}
+	fmt.Println("pre-flight passed")
+	return nil
+}
+
+func installHook(ctx context.Context, root string) error {
+	out, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-path", "hooks").Output()
+	if err != nil {
+		return err
+	}
+	dir := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(root, dir)
+	}
+	path := filepath.Join(dir, "pre-push")
+	if b, err := os.ReadFile(path); err == nil && !strings.Contains(string(b), hookMarker) {
+		return fmt.Errorf("%s exists and was not written by marshal; add `marshal preflight` to it yourself", path)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	hook := "#!/bin/sh\n" + hookMarker + "\n# Runs this repository's CI checks on HEAD before a push. Skip once with\n# git push --no-verify.\nexec marshal preflight\n"
+	if err := os.WriteFile(path, []byte(hook), 0o755); err != nil {
+		return err
+	}
+	fmt.Println("installed", path)
 	return nil
 }

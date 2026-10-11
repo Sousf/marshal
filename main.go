@@ -77,6 +77,8 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
   marshal incidents [--all]       failures that keep happening, one line per signature
   marshal ack <signature>         stop the daily reminder for an incident; a success closes it
   marshal quota [clear]           the quota hold, if any; clear lifts it early
+  marshal preflight               run this repo's CI checks on HEAD, as CI will, before you push
+      --install-hook                make every git push run it first
   marshal tap-key <repo>          give the repo's release workflow a deploy key for the Homebrew tap (your gh login)
   marshal notify test             send a test notification through the configured channels
   marshal digest                  print the daily summary
@@ -129,6 +131,9 @@ func app(args []string) error {
 		return nil
 	case "init":
 		return cmdInit()
+	case "preflight":
+		// Works in any repository, on any machine: no fleet needed.
+		return cmdPreflight(ctx, rest)
 	}
 
 	fleet, err := config.Load(config.Path())

@@ -127,7 +127,7 @@ jobs:
 
 func TestScrub(t *testing.T) {
 	env := scrub([]string{"PATH=/bin", "GH_TOKEN=x", "GIT_CONFIG_COUNT=1", "ANTHROPIC_API_KEY=y", "HOME=/h"})
-	if strings.Join(env, " ") != "PATH=/bin HOME=/h" {
+	if strings.Join(env, " ") != "PATH=/bin HOME=/h GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1" {
 		t.Errorf("%v", env)
 	}
 }
@@ -179,5 +179,26 @@ func TestTimeoutKillsChildren(t *testing.T) {
 	r := c.Run(context.Background(), t.TempDir(), "smoke")
 	if r.OK || time.Since(start) > 3*time.Second {
 		t.Errorf("took %s: %+v", time.Since(start), r)
+	}
+}
+
+func TestVerbsRunWithoutHostGitConfig(t *testing.T) {
+	t.Setenv("GIT_AUTHOR_NAME", "someone")
+	t.Setenv("GIT_CONFIG_GLOBAL", "/home/someone/.gitconfig")
+	c := &Contract{Version: 1, Verbs: map[string]string{"test": `test -z "$GIT_AUTHOR_NAME" && test "$GIT_CONFIG_GLOBAL" = /dev/null && test "$GIT_CONFIG_NOSYSTEM" = 1`}}
+	if r := c.Run(context.Background(), t.TempDir(), "test"); !r.OK {
+		t.Errorf("host git config leaked into a verb: %+v", r)
+	}
+}
+
+func TestMissingToolSkipsOnlyItsStep(t *testing.T) {
+	c := &Contract{Version: 1, Verbs: map[string]string{"ci": "x"}, Steps: []string{"true", "definitely-not-installed-xyz", "echo third; false"}}
+	r := c.Run(context.Background(), t.TempDir(), "ci")
+	if r.OK || r.Unavailable || !strings.Contains(r.Output, "[skipped, not installed here] definitely-not-installed-xyz") || !strings.Contains(r.Output, "third") {
+		t.Errorf("%+v", r)
+	}
+	c.Steps = []string{"nope-a-xyz", "nope-b-xyz"}
+	if r := c.Run(context.Background(), t.TempDir(), "ci"); !r.Unavailable {
+		t.Errorf("all missing should be unavailable: %+v", r)
 	}
 }

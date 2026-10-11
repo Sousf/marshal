@@ -179,6 +179,15 @@ Working today:
   switch, caps, `never:`, soak and revert watch. With `soak`, the window
   counts from when Dependabot opened the PR.
 
+- `marshal preflight` runs a repository's checks on a clean copy of HEAD
+  the way CI will. It works in any repo and needs no fleet file. Checks
+  come from `marshal.yaml`, or else from the pull-request workflows,
+  without runner setup (`sudo apt-get` and the like) and without your git
+  config. A workflow step whose program isn't installed is skipped and
+  named; the steps after it still run. `marshal preflight --install-hook`
+  makes every `git push` in that clone run it first; `git push
+  --no-verify` skips it once. MARSHAL's own pre-flight runs the same way.
+
 [SECURITY.md](SECURITY.md) is the trust model: what is a boundary, what is
 only a heuristic, and the gaps that remain until runs are isolated.
 
