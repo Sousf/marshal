@@ -81,6 +81,7 @@ policy:
 func TestReleaseJob(t *testing.T) {
 	ctx := context.Background()
 	o := origin(t)
+	write(t, o, map[string]string{".github/workflows/release.yml": "on:\n  push:\n    paths: [VERSION]\n"})
 	git := func(args ...string) string {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = o
@@ -104,6 +105,8 @@ func TestReleaseJob(t *testing.T) {
 		return rec, log.String()
 	}
 
+	git("add", ".")
+	git("commit", "--quiet", "-m", "release workflow")
 	git("tag", "v0.9.0")
 	if rec, log := run(); rec.Status != store.Skipped || !strings.Contains(rec.Error, "nothing since v0.9.0") {
 		t.Fatalf("nothing merged: %s %q\n%s", rec.Status, rec.Error, log)

@@ -178,9 +178,9 @@ func (x *Executor) release(ctx context.Context, job config.Job, repo config.Repo
 		rec.Head = head
 	}
 
-	if _, err := os.Stat(filepath.Join(ws.Dir, releaseWorkflow)); err != nil {
-		logf("note", "no %s; a release PR would ship nothing", releaseWorkflow)
-		return finish(store.Skipped, "release: no "+releaseWorkflow)
+	if _, _, ok := brewReady(ws.Dir); !ok {
+		logf("note", "%s does not release on a VERSION change; a release PR would ship nothing", releaseWorkflow)
+		return finish(store.Skipped, "release: no "+releaseWorkflow+" triggered by VERSION")
 	}
 	var last Version
 	released := false
