@@ -170,3 +170,14 @@ jobs:
 		t.Errorf("ci=%q setup=%v", c.Verbs["ci"], c.HostSetup)
 	}
 }
+
+// A shell that forks leaves its child holding the output pipe; a timeout
+// must kill the whole process group, not just the shell.
+func TestTimeoutKillsChildren(t *testing.T) {
+	c := &Contract{Version: 1, Timeout: time.Second, Verbs: map[string]string{"smoke": "sleep 6; true"}}
+	start := time.Now()
+	r := c.Run(context.Background(), t.TempDir(), "smoke")
+	if r.OK || time.Since(start) > 3*time.Second {
+		t.Errorf("took %s: %+v", time.Since(start), r)
+	}
+}

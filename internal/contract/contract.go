@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -149,6 +150,11 @@ func (c *Contract) Run(ctx context.Context, dir, verb string) Result {
 	sh.Dir = dir
 	// No credentials reach a verb: it is the repository's own command line.
 	sh.Env = append(scrub(os.Environ()), c.Env...)
+	// Its own process group, killed whole on timeout: a shell that forks
+	// (dash does) would otherwise leave the child running, holding the
+	// output pipe, and the verb would outlive its timeout.
+	sh.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	sh.Cancel = func() error { return syscall.Kill(-sh.Process.Pid, syscall.SIGKILL) }
 	sh.WaitDelay = 5 * time.Second
 	var out tail
 	sh.Stdout = &out

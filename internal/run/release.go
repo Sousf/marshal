@@ -214,6 +214,21 @@ func (x *Executor) release(ctx context.Context, job config.Job, repo config.Repo
 		return finish(store.Skipped, "release: nothing since "+lastTag)
 	}
 
+	// Same rule as every PR MARSHAL opens: its checks pass here first. A
+	// release PR changes only VERSION and the notes, so a failure is the
+	// default branch's, and red code is not released.
+	_, results := x.baseline(ctx, ws.Dir, logf)
+	var red []string
+	for _, r := range results {
+		if !r.OK && !r.Unavailable {
+			red = append(red, r.Verb)
+		}
+	}
+	if len(red) > 0 {
+		logf("blocked", "%s fails %s; no release until it is green", ws.Repo.Branch, strings.Join(red, ", "))
+		return finish(store.Skipped, "release: "+ws.Repo.Branch+" fails its checks ("+strings.Join(red, ", ")+")")
+	}
+
 	onBranch := ""
 	if _, err := git("fetch", "--quiet", "origin", ReleaseBranch); err == nil {
 		onBranch, _ = git("show", "FETCH_HEAD:VERSION")

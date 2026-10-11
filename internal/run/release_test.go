@@ -139,6 +139,17 @@ func TestReleaseJob(t *testing.T) {
 	}
 	os.Remove(filepath.Join(o, "VERSION"))
 
+	// A red default branch is not released.
+	write(t, o, map[string]string{"marshal.yaml": "contract: 1\nverbs:\n  test: 'test -f green'\n"})
+	git("add", ".")
+	git("commit", "--quiet", "-m", "a failing check")
+	if rec, _ := run(); rec.Status != store.Skipped || !strings.Contains(rec.Error, "fails its checks (test)") {
+		t.Errorf("red main: %s %q", rec.Status, rec.Error)
+	}
+	os.WriteFile(filepath.Join(o, "green"), nil, 0o644)
+	git("add", ".")
+	git("commit", "--quiet", "-m", "green again")
+
 	// Merged but not yet tagged: wait for the workflow, open nothing.
 	os.WriteFile(filepath.Join(o, "VERSION"), []byte("0.9.1\n"), 0o644)
 	git("add", ".")
