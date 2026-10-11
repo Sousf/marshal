@@ -35,6 +35,7 @@ type GitHub interface {
 	DependabotPRs(ctx context.Context, slug string) ([]github.PR, error)
 	ApprovePR(ctx context.Context, url, body string) error
 	ClosePR(ctx context.Context, url, comment string) error
+	FileText(ctx context.Context, slug, path string) (string, error)
 	ViewPR(ctx context.Context, url string) (github.PR, error)
 	MergePR(ctx context.Context, url string) error
 	CommentPR(ctx context.Context, url, body string) error
@@ -68,6 +69,9 @@ type Daemon struct {
 	Notify *notify.Multi
 	// LogPath is the file the log goes to when detached, for the log op.
 	LogPath string
+	// Restart, when set, replaces the running daemon with the binary at the
+	// given path. The command that started the daemon supplies it.
+	Restart func(path string)
 
 	mu        sync.Mutex
 	running   map[string]string // repo -> run ID
@@ -82,6 +86,10 @@ type Daemon struct {
 	lastErr  string
 	// now is swapped in tests.
 	now func() time.Time
+	// upgrading is set while a brew upgrade runs in the background.
+	upgrading bool
+	// restartTo is the new MARSHAL binary to restart into once idle.
+	restartTo string
 	// scanned is when each repo was last asked for Dependabot PRs.
 	scanned map[string]time.Time
 	// guard wraps Adapter in the quota guard exactly once.
@@ -273,6 +281,8 @@ func (d *Daemon) tick(ctx context.Context) {
 		d.fail("watch: %v", err)
 	}
 	d.discoverDependabot(ctx)
+	d.upgradeReleased(ctx)
+	d.maybeRestart()
 	d.maybeDigest(ctx)
 	d.announceHold(ctx)
 	if d.NoSchedule {
@@ -332,6 +342,7 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			r.Feedback = d.feedback(ctx, r)
 			r.MergeSHA = pr.MergeSHA
 			d.note(ctx, r.ID, "merged by %s", r.MergedBy)
+			d.expectRelease(ctx, r)
 			if r.MergedBy == "human" {
 				d.move(ctx, ladder, repo, r.Class, policy.Approved)
 				r.Settled = true // a human merge is not watched

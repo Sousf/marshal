@@ -499,3 +499,9 @@ func (c Client) ClosePR(ctx context.Context, url, comment string) error {
 	_, err := c.gh(ctx, "pr", "close", url, "--comment", comment)
 	return err
 }
+
+// FileText returns a file's contents from a repository's default branch.
+func (c Client) FileText(ctx context.Context, slug, path string) (string, error) {
+	out, err := c.gh(ctx, "api", "repos/"+slug+"/contents/"+path, "-H", "Accept: application/vnd.github.raw")
+	return string(out), err
+}

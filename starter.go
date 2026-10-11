@@ -170,6 +170,7 @@ memory:
 # templates, without an agent). Then run "marshal tap-key <repo>" once.
 # homebrew:
 #   tap: Sousf/homebrew-tap
+#   upgrade_local: true   # on the machine the tools are installed on
 
 # The deny floor. Nothing a job, task, chat, contract or trust level says
 # can lift it: paths are locked everywhere, tools are disallowed for every
