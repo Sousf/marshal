@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/tabwriter"
@@ -41,6 +43,10 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
 
   marshal                         the interface (same as marshal tui)
   marshal serve [--tick 1m]       the daemon: schedules jobs, syncs PRs, merges where trusted
+      --detach                      run in the background; log to <state>/serve.log
+      --no-schedule                 never start jobs on its own; triggers, sync and merges still work
+  marshal stop                    stop a detached daemon
+  marshal logs [-f]               the detached daemon's log
   marshal tui                     attach to the daemon, or read the database if it is down
 
   marshal init                    write a starter fleet file
@@ -150,6 +156,10 @@ func app(args []string) error {
 		return cmdAutonomy(ctx, rest)
 	case "verify":
 		return cmdVerify(ctx, fleet, rest)
+	case "stop":
+		return cmdStop()
+	case "logs":
+		return cmdLogs(rest)
 	}
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 }
@@ -234,10 +244,20 @@ func ghClient(app *ghapp.App) github.Client {
 
 func client() api.Client { return api.Client{Path: socketPath()} }
 
+func pidPath() string { return filepath.Join(config.StateDir(), "marshal.pid") }
+func logPath() string { return filepath.Join(config.StateDir(), "serve.log") }
+
 func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	tick := time.Minute
+	detach, noSchedule := false, false
+	var passthrough []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
+		case "--detach", "-d":
+			detach = true
+		case "--no-schedule":
+			noSchedule = true
+			passthrough = append(passthrough, args[i])
 		case "--tick":
 			if i+1 >= len(args) {
 				return errors.New("--tick needs a duration")
@@ -247,10 +267,17 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 				return fmt.Errorf("--tick: want a duration of at least 5s, got %q", args[i+1])
 			}
 			tick = d
+			passthrough = append(passthrough, args[i], args[i+1])
 			i++
 		default:
 			return fmt.Errorf("unknown flag %q", args[i])
 		}
+	}
+	if detach {
+		return detachServe(passthrough)
+	}
+	if client().Up() {
+		return fmt.Errorf("a daemon is already running on %s", socketPath())
 	}
 	st, err := openStore()
 	if err != nil {
@@ -267,7 +294,7 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	} else {
 		logger.Printf("acting as the host's gh login; set github_app in the fleet file for a bot identity")
 	}
-	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app}
+	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule}
 	if !d.Adapter.Available() {
 		logger.Printf("warning: %s is not on PATH; scheduled runs will fail until it is", "claude")
 	}
@@ -279,6 +306,114 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 		return err
 	}
 	return runErr
+}
+
+// detachServe re-executes this binary as a daemon in its own session, with
+// stdout and stderr in the log file and the pid recorded, then returns.
+// Plain enough to work without systemd; the unit in packaging/ is the
+// better answer on a host that has it.
+func detachServe(args []string) error {
+	if client().Up() {
+		return fmt.Errorf("a daemon is already running on %s", socketPath())
+	}
+	if err := os.MkdirAll(config.StateDir(), 0o700); err != nil {
+		return err
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	logf, err := os.OpenFile(logPath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return err
+	}
+	defer logf.Close()
+	cmd := exec.Command(self, append([]string{"serve"}, args...)...)
+	cmd.Stdout = logf
+	cmd.Stderr = logf
+	cmd.Stdin = nil
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	pid := cmd.Process.Pid
+	if err := os.WriteFile(pidPath(), []byte(strconv.Itoa(pid)+"\n"), 0o600); err != nil {
+		return err
+	}
+	// Do not wait; the child outlives us. Release so no zombie bookkeeping.
+	// Release zeroes the Pid field, hence the copy above.
+	_ = cmd.Process.Release()
+	// Give it a moment to come up so the user sees a real answer.
+	deadline := time.Now().Add(5 * time.Second)
+	for !client().Up() && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !client().Up() {
+		return fmt.Errorf("daemon did not come up; see %s", logPath())
+	}
+	fmt.Printf("daemon started, pid %d\nlog   %s\nstop  marshal stop\n", pid, logPath())
+	return nil
+}
+
+func readPid() (int, error) {
+	b, err := os.ReadFile(pidPath())
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return 0, fmt.Errorf("%s: bad pid", pidPath())
+	}
+	return pid, nil
+}
+
+func cmdStop() error {
+	pid, err := readPid()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if client().Up() {
+				return errors.New("a daemon is running but was not started with --detach; stop it where it runs")
+			}
+			fmt.Println("no detached daemon")
+			return nil
+		}
+		return err
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return err
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		os.Remove(pidPath())
+		fmt.Printf("pid %d is not running; removed stale pid file\n", pid)
+		return nil
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for client().Up() && time.Now().Before(deadline) {
+		time.Sleep(200 * time.Millisecond)
+	}
+	os.Remove(pidPath())
+	if client().Up() {
+		return fmt.Errorf("pid %d did not stop within 20s; in-flight runs may be finishing", pid)
+	}
+	fmt.Printf("stopped pid %d\n", pid)
+	return nil
+}
+
+func cmdLogs(args []string) error {
+	follow := len(args) > 0 && (args[0] == "-f" || args[0] == "--follow")
+	if _, err := os.Stat(logPath()); err != nil {
+		return fmt.Errorf("no log at %s; the daemon was not started with --detach", logPath())
+	}
+	tailArgs := []string{"-n", "100"}
+	if follow {
+		tailArgs = append(tailArgs, "-f")
+	}
+	cmd := exec.Command("tail", append(tailArgs, logPath())...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 // source picks the daemon when one answers, else the database directly.
@@ -321,6 +456,9 @@ func cmdStatus(ctx context.Context) error {
 		s.Version, ago(s.Started), auto, len(s.Running), strings.Join(s.Running, " "), len(s.Verifying), strings.Join(s.Verifying, " "), s.Spend24h, ago(s.LastTick))
 	if s.LastError != "" {
 		fmt.Printf("last error: %s\n", s.LastError)
+	}
+	if pid, err := readPid(); err == nil {
+		fmt.Printf("detached: pid %d, log %s\n", pid, logPath())
 	}
 	return nil
 }

@@ -474,6 +474,36 @@ func TestScheduleFiresOnceAndRespectsBusy(t *testing.T) {
 	}
 }
 
+func TestScheduleStaggersAndCanBeOff(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{}}
+	d, a := newDaemon(t, gh)
+	// A second repo so two daily jobs are due at once.
+	d.Fleet.Repos = append(d.Fleet.Repos, config.Repo{Name: "y", URL: d.Fleet.Repos[0].URL, Jobs: []string{"audit"}})
+	d.NoSchedule = true
+	d.tick(ctx)
+	wait(t, d)
+	if runs, _ := d.Store.ListRuns(ctx, "", 0); len(runs) != 0 {
+		t.Fatal("scheduler off must start nothing")
+	}
+	d.NoSchedule = false
+	d.tick(ctx)
+	wait(t, d)
+	if runs, _ := d.Store.ListRuns(ctx, "", 0); len(runs) != 1 {
+		t.Fatalf("one tick starts one job, got %d", len(runs))
+	}
+	d.tick(ctx)
+	wait(t, d)
+	if runs, _ := d.Store.ListRuns(ctx, "", 0); len(runs) != 2 {
+		t.Fatalf("next tick starts the next, got %d", len(runs))
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.calls != 2 {
+		t.Errorf("calls = %d", a.calls)
+	}
+}
+
 func TestTriggerAndHandle(t *testing.T) {
 	ctx := context.Background()
 	gh := &fakeGH{prs: map[string]github.PR{}}

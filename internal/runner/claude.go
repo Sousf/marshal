@@ -87,6 +87,9 @@ func (c Claude) Args(req Request) []string {
 func (c Claude) Run(ctx context.Context, req Request, emit func(Event)) (Result, error) {
 	args := c.Args(req)
 	cmd := exec.CommandContext(ctx, c.binary(), args...)
+	// On cancellation the child is killed; WaitDelay bounds how long Wait
+	// then blocks on pipes a grandchild may still hold open.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = req.Dir
 	cmd.Stdin = strings.NewReader(req.Prompt)
 	cmd.Env = append(os.Environ(), req.Env...)

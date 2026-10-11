@@ -49,13 +49,21 @@ type Daemon struct {
 	// Auth, when set, is the GitHub App every run and verification acts as.
 	Auth *ghapp.App
 	Log  *log.Logger
+	// NoSchedule keeps the daemon from starting jobs on its own. It still
+	// syncs proposals, verifies, merges where trusted, and takes triggers.
+	NoSchedule bool
 
 	mu        sync.Mutex
 	running   map[string]string // repo -> run ID
 	verifying map[string]bool   // run ID -> in progress
 	started   time.Time
-	lastTick  time.Time
-	lastErr   string
+	// base is the lifetime of the daemon. Runs and verifications hang off it
+	// rather than off the request that started them, so a closed socket
+	// connection does not cancel a run but a stopping daemon does, taking
+	// its agent subprocesses with it instead of orphaning them.
+	base     context.Context
+	lastTick time.Time
+	lastErr  string
 	// now is swapped in tests.
 	now func() time.Time
 }
@@ -79,23 +87,37 @@ func (d *Daemon) init() {
 	if d.started.IsZero() {
 		d.started = d.now()
 	}
+	if d.base == nil {
+		d.base = context.Background()
+	}
 }
 
 // Run executes ticks until ctx is done.
 func (d *Daemon) Run(ctx context.Context) error {
+	d.base = ctx
 	d.init()
 	tick := d.Tick
 	if tick == 0 {
 		tick = time.Minute
 	}
 	d.Log.Printf("marshal %s: %d repos, %d jobs, tick %s", d.Version, len(d.Fleet.Repos), len(d.Fleet.Jobs), tick)
+	if d.NoSchedule {
+		d.Log.Printf("scheduler off: jobs start only by trigger")
+	}
 	t := time.NewTicker(tick)
 	defer t.Stop()
 	d.tick(ctx)
 	for {
 		select {
 		case <-ctx.Done():
-			d.Log.Printf("stopping; %d run(s) in flight will be cancelled", len(d.inFlight()))
+			n := len(d.inFlight())
+			d.Log.Printf("stopping; cancelling %d run(s) in flight", n)
+			// Give the executors a moment to record the cancellation and
+			// remove their work trees before the process exits.
+			deadline := time.Now().Add(10 * time.Second)
+			for len(d.inFlight()) > 0 && time.Now().Before(deadline) {
+				time.Sleep(100 * time.Millisecond)
+			}
 			return nil
 		case <-t.C:
 			d.tick(ctx)
@@ -112,6 +134,9 @@ func (d *Daemon) tick(ctx context.Context) {
 	d.mu.Unlock()
 	if err := d.syncProposals(ctx); err != nil {
 		d.fail("sync: %v", err)
+	}
+	if d.NoSchedule {
+		return
 	}
 	if err := d.schedule(ctx); err != nil {
 		d.fail("schedule: %v", err)
@@ -278,7 +303,7 @@ func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
 	d.mu.Unlock()
 	d.note(ctx, r.ID, "verifying head %s", short(pr.HeadSHA))
 	v := &verifier.Verifier{Fleet: d.Fleet, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
-	bg := context.WithoutCancel(ctx)
+	bg := d.base
 	go func() {
 		defer func() {
 			d.mu.Lock()
@@ -350,9 +375,13 @@ func (d *Daemon) note(ctx context.Context, runID, format string, args ...any) {
 	_ = d.Store.AppendEvent(ctx, runID, store.Event{Kind: "note", Text: text})
 }
 
-// schedule starts whatever is due. One run per repo at a time.
+// schedule starts what is due: at most one job per tick across the fleet,
+// so a fresh daemon with every weekly job "never run" does not start them
+// all in the same minute. The rest follow on later ticks.
 func (d *Daemon) schedule(ctx context.Context) error {
 	now := d.now()
+	started := false
+	due := 0
 	for _, repo := range d.Fleet.Repos {
 		repo, _ = d.Fleet.Repo(repo.Name)
 		if d.busy(repo.Name) {
@@ -397,11 +426,20 @@ func (d *Daemon) schedule(ctx context.Context) error {
 			if !fire {
 				continue
 			}
+			due++
+			if started {
+				continue
+			}
 			if _, err := d.Trigger(ctx, job.Name, repo.Name); err != nil {
 				d.fail("%s on %s: %v", job.Name, repo.Name, err)
+				continue
 			}
-			break // one job per repo per tick; the next tick picks up the rest
+			started = true
+			break // one job per repo per tick as well
 		}
+	}
+	if due > 1 {
+		d.Log.Printf("%d jobs due; starting one per tick", due)
 	}
 	return nil
 }
@@ -465,21 +503,23 @@ func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) 
 
 	d.Log.Printf("run %s: starting %s on %s", id, job, repo)
 	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
-	// Detached from the request's context: the trigger returns at once and
-	// the run lives as long as the daemon does.
-	runCtx := context.WithoutCancel(ctx)
 	go func() {
 		defer func() {
 			d.mu.Lock()
 			delete(d.running, repo)
 			d.mu.Unlock()
 		}()
-		rec, err := x.Execute(runCtx, job, repo, run.Options{ID: id})
+		rec, err := x.Execute(d.base, job, repo, run.Options{ID: id})
 		if err != nil {
 			d.fail("run %s: %v", id, err)
 			return
 		}
-		d.Log.Printf("run %s: %s %s", id, rec.Status, rec.PRURL)
+		switch rec.Status {
+		case store.Failed, store.Blocked, store.Cancelled:
+			d.Log.Printf("run %s: %s: %s", id, rec.Status, firstLine(rec.Error))
+		default:
+			d.Log.Printf("run %s: %s %s", id, rec.Status, rec.PRURL)
+		}
 	}()
 	return id, nil
 }
