@@ -80,7 +80,10 @@ type Repo struct {
 	Name string `yaml:"name"`
 	URL  string `yaml:"url"`
 	// Branch is the base for PRs. Empty means the remote's default branch.
-	Branch string   `yaml:"branch"`
+	Branch string `yaml:"branch"`
+	// GitHub is the owner/name slug when it cannot be read off the URL, for
+	// example when url is a local mirror. Empty means derive it from url.
+	GitHub string   `yaml:"github"`
 	Jobs   []string `yaml:"jobs"`
 	// Trust overrides the policy's starting level for a class, per repo.
 	// A brand new repo joins at review regardless of what it has earned

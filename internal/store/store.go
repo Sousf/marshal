@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -50,6 +51,9 @@ type Run struct {
 	CostUSD    float64
 	Branch     string
 	PRURL      string
+	// MergedBy records who merged a Proposed run: "human", "auto" or "soak".
+	// Only human merges count as approvals on the trust ladder.
+	MergedBy string
 	// Summary is the agent's final report; the PR body.
 	Summary string
 	// Error explains Failed or Blocked.
@@ -121,6 +125,10 @@ CREATE TABLE IF NOT EXISTS runs (
 	error TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS runs_repo ON runs(repo, started_at);
+CREATE TABLE IF NOT EXISTS settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS events (
 	seq INTEGER PRIMARY KEY AUTOINCREMENT,
 	run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -143,8 +151,19 @@ CREATE TABLE IF NOT EXISTS trust (
 `
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Columns added after the first release. SQLite has no ADD COLUMN IF NOT
+	// EXISTS, so the error for an existing column is the expected outcome.
+	for _, stmt := range []string{
+		`ALTER TABLE runs ADD COLUMN merged_by TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
+	return nil
 }
 
 // NewID returns a short random identifier: 8 hex characters is enough for
@@ -182,8 +201,8 @@ func (s *Store) UpdateRun(ctx context.Context, r *Run) error {
 		fin = r.FinishedAt.Unix()
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=?, turns=?,
-		cost_usd=?, branch=?, pr_url=?, summary=?, error=? WHERE id=?`,
-		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.ID)
+		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=? WHERE id=?`,
+		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.ID)
 	if err != nil {
 		return err
 	}
@@ -207,14 +226,14 @@ func (s *Store) AppendEvent(ctx context.Context, runID string, e Event) error {
 var ErrNotFound = errors.New("not found")
 
 const runCols = `id, job, repo, class, adapter, model, status, started_at, finished_at,
-	turns, cost_usd, branch, pr_url, summary, error`
+	turns, cost_usd, branch, pr_url, summary, error, merged_by`
 
 func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var r Run
 	var started int64
 	var finished sql.NullInt64
 	err := sc.Scan(&r.ID, &r.Job, &r.Repo, &r.Class, &r.Adapter, &r.Model, &r.Status,
-		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error)
+		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy)
 	if err != nil {
 		return r, err
 	}
@@ -277,6 +296,93 @@ func (s *Store) ListRuns(ctx context.Context, repo string, limit int) ([]Run, er
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// ListByStatus returns every run in one of the given statuses, oldest first.
+func (s *Store) ListByStatus(ctx context.Context, statuses ...Status) ([]Run, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+	q := `SELECT ` + runCols + ` FROM runs WHERE status IN (`
+	var args []any
+	for i, st := range statuses {
+		if i > 0 {
+			q += ","
+		}
+		q += "?"
+		args = append(args, st)
+	}
+	q += `) ORDER BY started_at`
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// LastStarted returns when a job last started against a repo, or zero.
+func (s *Store) LastStarted(ctx context.Context, job, repo string) (time.Time, error) {
+	var ts sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT MAX(started_at) FROM runs WHERE job=? AND repo=?`, job, repo).Scan(&ts)
+	if err != nil || !ts.Valid {
+		return time.Time{}, err
+	}
+	return time.Unix(ts.Int64, 0), nil
+}
+
+// CountMergedBy counts runs on a repo merged by a given actor after t.
+func (s *Store) CountMergedBy(ctx context.Context, repo, by string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE repo=? AND merged_by=? AND finished_at>=?`,
+		repo, by, since.Unix()).Scan(&n)
+	return n, err
+}
+
+// EventsAfter returns a run's events with seq greater than after, for
+// tailing a live run.
+func (s *Store) EventsAfter(ctx context.Context, runID string, after int64) ([]Event, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT seq, at, kind, text FROM events WHERE run_id=? AND seq>? ORDER BY seq`, runID, after)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Event
+	for rows.Next() {
+		var e Event
+		var at int64
+		if err := rows.Scan(&e.Seq, &at, &e.Kind, &e.Text); err != nil {
+			return nil, err
+		}
+		e.At = time.UnixMilli(at)
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// Setting reads a key from the settings table; def when unset.
+func (s *Store) Setting(ctx context.Context, key, def string) (string, error) {
+	var v string
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM settings WHERE key=?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return def, nil
+	}
+	return v, err
+}
+
+// SetSetting writes a key.
+func (s *Store) SetSetting(ctx context.Context, key, value string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?,?)
+		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
+	return err
 }
 
 // Events returns a run's log in order.

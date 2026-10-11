@@ -10,6 +10,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,12 +19,17 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/term"
+
+	"github.com/Sousf/marshal/internal/api"
 	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/daemon"
+	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
-	"github.com/Sousf/marshal/internal/policy"
 	"github.com/Sousf/marshal/internal/run"
 	"github.com/Sousf/marshal/internal/runner"
 	"github.com/Sousf/marshal/internal/store"
+	"github.com/Sousf/marshal/internal/ui"
 )
 
 // version is stamped at build time with -X main.version.
@@ -31,22 +37,30 @@ var version = "dev"
 
 const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Learns
 
+  marshal                         the interface (same as marshal tui)
+  marshal serve [--tick 1m]       the daemon: schedules jobs, syncs PRs, merges where trusted
+  marshal tui                     attach to the daemon, or read the database if it is down
+
   marshal init                    write a starter fleet file
   marshal check                   validate the fleet file
   marshal repos                   list repositories and their jobs
   marshal jobs                    list jobs and their effective settings
   marshal prompt <job> <repo>     print the brief a run would send, without running
-  marshal run <job> <repo>        run a job: clone, brief the agent, check, commit, open a PR
+
+  marshal run <job> <repo>        run a job here, in the foreground, and open a PR
       --no-pr                       commit on a local branch only, open nothing
       --keep                        leave the work tree on disk
+  marshal trigger <job> <repo>    ask the daemon to run a job in the background
   marshal runs [repo]             recent runs
   marshal show <run-id>           one run's record and event log
   marshal trust                   where each repo and class sits on the ladder
+  marshal status                  is the daemon up, is autonomy on, what is running
+  marshal autonomy on|off         the kill switch: off stops every auto-merge
   marshal version
 
 Files:
   fleet   ` + "$MARSHAL_CONFIG" + `  default ~/.config/marshal/fleet.yaml
-  state   ` + "$MARSHAL_STATE" + `   default ~/.local/share/marshal
+  state   ` + "$MARSHAL_STATE" + `   default ~/.local/share/marshal (database, work trees, socket)
 `
 
 func main() {
@@ -57,7 +71,15 @@ func main() {
 }
 
 func app(args []string) error {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+	if len(args) == 0 {
+		if term.IsTerminal(int(os.Stdout.Fd())) {
+			args = []string{"tui"}
+		} else {
+			fmt.Print(usage)
+			return nil
+		}
+	}
+	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		fmt.Print(usage)
 		return nil
 	}
@@ -99,8 +121,146 @@ func app(args []string) error {
 		return cmdShow(ctx, rest)
 	case "trust":
 		return cmdTrust(ctx, fleet)
+	case "serve":
+		return cmdServe(ctx, fleet, rest)
+	case "tui":
+		return cmdTUI(ctx, fleet)
+	case "status":
+		return cmdStatus(ctx)
+	case "trigger":
+		return cmdTrigger(ctx, rest)
+	case "autonomy":
+		return cmdAutonomy(ctx, rest)
 	}
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
+}
+
+func socketPath() string { return filepath.Join(config.StateDir(), "marshal.sock") }
+
+func client() api.Client { return api.Client{Path: socketPath()} }
+
+func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
+	tick := time.Minute
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--tick":
+			if i+1 >= len(args) {
+				return errors.New("--tick needs a duration")
+			}
+			d, err := time.ParseDuration(args[i+1])
+			if err != nil || d < 5*time.Second {
+				return fmt.Errorf("--tick: want a duration of at least 5s, got %q", args[i+1])
+			}
+			tick = d
+			i++
+		default:
+			return fmt.Errorf("unknown flag %q", args[i])
+		}
+	}
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	logger := log.New(os.Stderr, "", log.LstdFlags)
+	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: github.Client{}, Version: version, Tick: tick, Log: logger}
+	if !d.Adapter.Available() {
+		logger.Printf("warning: %s is not on PATH; scheduled runs will fail until it is", "claude")
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- api.Serve(ctx, socketPath(), d) }()
+	logger.Printf("listening on %s", socketPath())
+	runErr := d.Run(ctx)
+	if err := <-errc; err != nil && runErr == nil {
+		return err
+	}
+	return runErr
+}
+
+// source picks the daemon when one answers, else the database directly.
+func source(f *config.Fleet) (ui.Source, func(), error) {
+	c := client()
+	if c.Up() {
+		return ui.Daemon{Client: c}, func() {}, nil
+	}
+	st, err := openStore()
+	if err != nil {
+		return nil, nil, err
+	}
+	return ui.Local{Store: st, Fleet: f}, func() { st.Close() }, nil
+}
+
+func cmdTUI(ctx context.Context, f *config.Fleet) error {
+	src, done, err := source(f)
+	if err != nil {
+		return err
+	}
+	defer done()
+	return ui.Run(ctx, src, f, version)
+}
+
+func cmdStatus(ctx context.Context) error {
+	resp, err := client().Do(ctx, api.Request{Op: "status"})
+	if err != nil {
+		if errors.Is(err, api.ErrDown) {
+			fmt.Println("daemon: down (" + socketPath() + ")")
+			return nil
+		}
+		return err
+	}
+	s := resp.Status
+	auto := "on"
+	if !s.Autonomy {
+		auto = "OFF"
+	}
+	fmt.Printf("daemon: up (%s), started %s\nautonomy: %s\nrunning: %d %s\nspend 24h: $%.2f\nlast tick: %s\n",
+		s.Version, ago(s.Started), auto, len(s.Running), strings.Join(s.Running, " "), s.Spend24h, ago(s.LastTick))
+	if s.LastError != "" {
+		fmt.Printf("last error: %s\n", s.LastError)
+	}
+	return nil
+}
+
+func cmdTrigger(ctx context.Context, args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: marshal trigger <job> <repo>")
+	}
+	resp, err := client().Do(ctx, api.Request{Op: "trigger", Job: args[0], Repo: args[1]})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("run %s started; `marshal show %s` to follow\n", resp.ID, resp.ID)
+	return nil
+}
+
+func cmdAutonomy(ctx context.Context, args []string) error {
+	if len(args) != 1 || (args[0] != "on" && args[0] != "off") {
+		return errors.New("usage: marshal autonomy on|off")
+	}
+	resp, err := client().Do(ctx, api.Request{Op: "autonomy", Value: args[0]})
+	if err != nil {
+		if errors.Is(err, api.ErrDown) {
+			// The daemon reads the setting on every tick, so the database
+			// is the source of truth and can be set without it.
+			st, err := openStore()
+			if err != nil {
+				return err
+			}
+			defer st.Close()
+			if err := st.SetSetting(ctx, "autonomy", args[0]); err != nil {
+				return err
+			}
+			fmt.Printf("autonomy %s (daemon down; it will pick this up when started)\n", args[0])
+			return nil
+		}
+		return err
+	}
+	state := "off"
+	if resp.Status.Autonomy {
+		state = "on"
+	}
+	fmt.Println("autonomy", state)
+	return nil
 }
 
 func openStore() (*store.Store, error) {
@@ -297,26 +457,10 @@ func cmdTrust(ctx context.Context, f *config.Fleet) error {
 	if err != nil {
 		return err
 	}
-	byKey := map[string]store.Trust{}
-	for _, t := range recorded {
-		byKey[t.Repo+"/"+t.Class] = t
-	}
-	l := policy.Ladder{Fleet: f}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "REPO\tCLASS\tLEVEL\tSTREAK\tAPPROVED\tREJECTED\tREVERTED")
-	for _, r := range f.Repos {
-		r, _ = f.Repo(r.Name)
-		seen := map[string]bool{}
-		for _, jn := range r.Jobs {
-			j, ok := f.Job(jn)
-			if !ok || seen[j.Class] {
-				continue
-			}
-			seen[j.Class] = true
-			t, found := byKey[r.Name+"/"+j.Class]
-			t = l.Current(r, j.Class, t, found)
-			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\n", r.Name, j.Class, t.Level, t.Streak, t.Approvals, t.Rejections, t.Reverts)
-		}
+	for _, t := range daemon.Ladder(f, recorded) {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\n", t.Repo, t.Class, t.Level, t.Streak, t.Approvals, t.Rejections, t.Reverts)
 	}
 	return w.Flush()
 }

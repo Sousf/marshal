@@ -1,0 +1,489 @@
+// Package daemon is the always-on half of MARSHAL. It fires jobs on their
+// schedules, watches the pull requests they opened, moves the trust ladder
+// when a human decides, and merges on its own only where the ladder says it
+// may and every gate agrees.
+package daemon
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	"github.com/Sousf/marshal/internal/api"
+	"github.com/Sousf/marshal/internal/config"
+	"github.com/Sousf/marshal/internal/github"
+	"github.com/Sousf/marshal/internal/policy"
+	"github.com/Sousf/marshal/internal/run"
+	"github.com/Sousf/marshal/internal/runner"
+	"github.com/Sousf/marshal/internal/sched"
+	"github.com/Sousf/marshal/internal/store"
+)
+
+// GitHub is what the daemon needs from GitHub, as an interface so tests can
+// script it.
+type GitHub interface {
+	ViewPR(ctx context.Context, url string) (github.PR, error)
+	MergePR(ctx context.Context, url string) error
+	CommentPR(ctx context.Context, url, body string) error
+	LatestCI(ctx context.Context, slug, branch string) (github.CI, bool, error)
+	DefaultBranch(ctx context.Context, slug string) (string, error)
+}
+
+// Daemon holds the loop's state.
+type Daemon struct {
+	Fleet   *config.Fleet
+	Store   *store.Store
+	Adapter runner.Adapter
+	GH      GitHub
+	Version string
+	// Tick is how often the loop runs. Zero means one minute.
+	Tick time.Duration
+	// WorkRoot is passed to the executor. Empty means the default.
+	WorkRoot string
+	Log      *log.Logger
+
+	mu       sync.Mutex
+	running  map[string]string // repo -> run ID
+	started  time.Time
+	lastTick time.Time
+	lastErr  string
+	// now is swapped in tests.
+	now func() time.Time
+}
+
+// autonomyKey is the settings row for the kill switch.
+const autonomyKey = "autonomy"
+
+func (d *Daemon) init() {
+	if d.running == nil {
+		d.running = map[string]string{}
+	}
+	if d.now == nil {
+		d.now = time.Now
+	}
+	if d.Log == nil {
+		d.Log = log.Default()
+	}
+	if d.started.IsZero() {
+		d.started = d.now()
+	}
+}
+
+// Run executes ticks until ctx is done.
+func (d *Daemon) Run(ctx context.Context) error {
+	d.init()
+	tick := d.Tick
+	if tick == 0 {
+		tick = time.Minute
+	}
+	d.Log.Printf("marshal %s: %d repos, %d jobs, tick %s", d.Version, len(d.Fleet.Repos), len(d.Fleet.Jobs), tick)
+	t := time.NewTicker(tick)
+	defer t.Stop()
+	d.tick(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			d.Log.Printf("stopping; %d run(s) in flight will be cancelled", len(d.inFlight()))
+			return nil
+		case <-t.C:
+			d.tick(ctx)
+		}
+	}
+}
+
+// tick is one pass: settle what humans decided, merge what may merge, start
+// what is due.
+func (d *Daemon) tick(ctx context.Context) {
+	d.init()
+	d.mu.Lock()
+	d.lastTick = d.now()
+	d.mu.Unlock()
+	if err := d.syncProposals(ctx); err != nil {
+		d.fail("sync: %v", err)
+	}
+	if err := d.schedule(ctx); err != nil {
+		d.fail("schedule: %v", err)
+	}
+}
+
+func (d *Daemon) fail(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	d.Log.Print(msg)
+	d.mu.Lock()
+	d.lastErr = msg
+	d.mu.Unlock()
+}
+
+// Autonomy reports whether the kill switch is on.
+func (d *Daemon) Autonomy(ctx context.Context) bool {
+	v, err := d.Store.Setting(ctx, autonomyKey, "on")
+	return err == nil && v == "on"
+}
+
+// syncProposals looks at every open proposal and applies what happened.
+func (d *Daemon) syncProposals(ctx context.Context) error {
+	runs, err := d.Store.ListByStatus(ctx, store.Proposed)
+	if err != nil {
+		return err
+	}
+	autonomy := d.Autonomy(ctx)
+	ladder := policy.Ladder{Fleet: d.Fleet}
+	for _, r := range runs {
+		if r.PRURL == "" {
+			continue
+		}
+		pr, err := d.GH.ViewPR(ctx, r.PRURL)
+		if err != nil {
+			d.fail("run %s: %v", r.ID, err)
+			continue
+		}
+		repo, _ := d.Fleet.Repo(r.Repo)
+		switch {
+		case pr.Merged():
+			r.Status = store.Merged
+			r.FinishedAt = d.now()
+			if r.MergedBy == "" {
+				r.MergedBy = "human"
+			}
+			d.note(ctx, r.ID, "merged by %s", r.MergedBy)
+			if r.MergedBy == "human" {
+				d.move(ctx, ladder, repo, r.Class, policy.Approved)
+			}
+		case pr.Closed():
+			r.Status = store.Rejected
+			r.FinishedAt = d.now()
+			d.note(ctx, r.ID, "closed without merging")
+			d.move(ctx, ladder, repo, r.Class, policy.Rejected)
+		default:
+			if !autonomy {
+				continue
+			}
+			by, reason := d.mayMerge(ctx, ladder, repo, r, pr)
+			if by == "" {
+				if reason != "" {
+					d.Log.Printf("run %s: holding: %s", r.ID, reason)
+				}
+				continue
+			}
+			if err := d.GH.MergePR(ctx, r.PRURL); err != nil {
+				d.fail("run %s: merge: %v", r.ID, err)
+				continue
+			}
+			r.Status = store.Merged
+			r.MergedBy = by
+			r.FinishedAt = d.now()
+			d.note(ctx, r.ID, "merged by marshal (%s)", by)
+			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("Merged by MARSHAL: class `%s` is at level `%s` for this repository, checks were green, and the %s gate passed.", r.Class, by, by))
+		}
+		if err := d.Store.UpdateRun(ctx, &r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mayMerge applies every gate. It returns "auto" or "soak" when the PR may
+// merge, else "" and the reason it is held.
+func (d *Daemon) mayMerge(ctx context.Context, ladder policy.Ladder, repo config.Repo, r store.Run, pr github.PR) (string, string) {
+	t, found, err := d.Store.GetTrust(ctx, repo.Name, r.Class)
+	if err != nil {
+		return "", err.Error()
+	}
+	t = ladder.Current(repo, r.Class, t, found)
+	level := config.Level(t.Level)
+	auto, soak := policy.MayMerge(level)
+	if !auto {
+		return "", "" // review or locked: nothing to log every tick
+	}
+	switch {
+	case pr.Checks == "":
+		return "", "no CI checks on the PR; a repo without CI gets no autonomy"
+	case pr.Checks != "SUCCESS":
+		return "", "checks " + pr.Checks
+	case pr.Review == "CHANGES_REQUESTED":
+		return "", "changes requested"
+	case pr.HasLabel("hold"):
+		return "", "hold label"
+	}
+	if soak {
+		hours := d.Fleet.Policy.Classes[r.Class].SoakHours
+		if hours <= 0 {
+			hours = 24
+		}
+		if d.now().Sub(r.StartedAt) < time.Duration(hours)*time.Hour {
+			return "", fmt.Sprintf("soaking until %s", r.StartedAt.Add(time.Duration(hours)*time.Hour).Format(time.RFC3339))
+		}
+	}
+	if cap := d.Fleet.Policy.Caps.AutoMergesPerRepoPerDay; cap > 0 {
+		n := 0
+		for _, by := range []string{"auto", "soak"} {
+			c, err := d.Store.CountMergedBy(ctx, repo.Name, by, d.now().Add(-24*time.Hour))
+			if err != nil {
+				return "", err.Error()
+			}
+			n += c
+		}
+		if n >= cap {
+			return "", fmt.Sprintf("auto-merge cap reached (%d/24h)", cap)
+		}
+	}
+	if soak {
+		return "soak", ""
+	}
+	return "auto", ""
+}
+
+// move applies an outcome to the ladder and persists it.
+func (d *Daemon) move(ctx context.Context, ladder policy.Ladder, repo config.Repo, class string, o policy.Outcome) {
+	t, found, err := d.Store.GetTrust(ctx, repo.Name, class)
+	if err != nil {
+		d.fail("trust %s/%s: %v", repo.Name, class, err)
+		return
+	}
+	before := ladder.Current(repo, class, t, found)
+	after := ladder.Apply(before, o)
+	if err := d.Store.PutTrust(ctx, after); err != nil {
+		d.fail("trust %s/%s: %v", repo.Name, class, err)
+		return
+	}
+	if after.Level != before.Level {
+		d.Log.Printf("trust %s/%s: %s -> %s", repo.Name, class, before.Level, after.Level)
+	}
+}
+
+func (d *Daemon) note(ctx context.Context, runID, format string, args ...any) {
+	text := fmt.Sprintf(format, args...)
+	d.Log.Printf("run %s: %s", runID, text)
+	_ = d.Store.AppendEvent(ctx, runID, store.Event{Kind: "note", Text: text})
+}
+
+// schedule starts whatever is due. One run per repo at a time.
+func (d *Daemon) schedule(ctx context.Context) error {
+	now := d.now()
+	for _, repo := range d.Fleet.Repos {
+		repo, _ = d.Fleet.Repo(repo.Name)
+		if d.busy(repo.Name) {
+			continue
+		}
+		var ci *github.CI // fetched at most once per repo per tick
+		for _, jn := range repo.Jobs {
+			job, ok := d.Fleet.Job(jn)
+			if !ok {
+				continue
+			}
+			s, err := sched.Parse(job.Schedule)
+			if err != nil {
+				d.fail("job %s: %v", job.Name, err)
+				continue
+			}
+			if s.Manual() {
+				continue
+			}
+			last, err := d.Store.LastStarted(ctx, job.Name, repo.Name)
+			if err != nil {
+				return err
+			}
+			fire := false
+			switch {
+			case s.OnFailure:
+				if !s.Cooldown(last, now) {
+					continue
+				}
+				if ci == nil {
+					c, err := d.defaultCI(ctx, repo)
+					if err != nil {
+						d.fail("%s: ci: %v", repo.Name, err)
+						continue
+					}
+					ci = &c
+				}
+				fire = ci.Red()
+			default:
+				fire = s.Due(last, now)
+			}
+			if !fire {
+				continue
+			}
+			if _, err := d.Trigger(ctx, job.Name, repo.Name); err != nil {
+				d.fail("%s on %s: %v", job.Name, repo.Name, err)
+			}
+			break // one job per repo per tick; the next tick picks up the rest
+		}
+	}
+	return nil
+}
+
+func (d *Daemon) defaultCI(ctx context.Context, repo config.Repo) (github.CI, error) {
+	slug := repo.GitHub
+	if slug == "" {
+		s, ok := github.Slug(repo.URL)
+		if !ok {
+			return github.CI{}, fmt.Errorf("%s: not a GitHub URL and no github: slug set; on-failure needs gh", repo.URL)
+		}
+		slug = s
+	}
+	branch := repo.Branch
+	if branch == "" {
+		b, err := d.GH.DefaultBranch(ctx, slug)
+		if err != nil {
+			return github.CI{}, err
+		}
+		branch = b
+	}
+	ci, _, err := d.GH.LatestCI(ctx, slug, branch)
+	return ci, err
+}
+
+func (d *Daemon) busy(repo string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	_, ok := d.running[repo]
+	return ok
+}
+
+func (d *Daemon) inFlight() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var ids []string
+	for _, id := range d.running {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// Trigger starts a job against a repo in the background and returns the run
+// ID. A repo with a run in flight refuses a second.
+func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) {
+	d.init()
+	if _, ok := d.Fleet.Job(job); !ok {
+		return "", fmt.Errorf("unknown job %q", job)
+	}
+	if _, ok := d.Fleet.Repo(repo); !ok {
+		return "", fmt.Errorf("unknown repo %q", repo)
+	}
+	d.mu.Lock()
+	if id, ok := d.running[repo]; ok {
+		d.mu.Unlock()
+		return "", fmt.Errorf("%s is busy with run %s", repo, id)
+	}
+	id := store.NewID()
+	d.running[repo] = id
+	d.mu.Unlock()
+
+	d.Log.Printf("run %s: starting %s on %s", id, job, repo)
+	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot}
+	// Detached from the request's context: the trigger returns at once and
+	// the run lives as long as the daemon does.
+	runCtx := context.WithoutCancel(ctx)
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			delete(d.running, repo)
+			d.mu.Unlock()
+		}()
+		rec, err := x.Execute(runCtx, job, repo, run.Options{ID: id})
+		if err != nil {
+			d.fail("run %s: %v", id, err)
+			return
+		}
+		d.Log.Printf("run %s: %s %s", id, rec.Status, rec.PRURL)
+	}()
+	return id, nil
+}
+
+// Handle implements api.Handler.
+func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
+	d.init()
+	switch req.Op {
+	case "status":
+		spend, _ := d.Store.SpendSince(ctx, d.now().Add(-24*time.Hour))
+		d.mu.Lock()
+		st := &api.Status{Version: d.Version, Started: d.started, Running: d.inFlightLocked(),
+			Repos: len(d.Fleet.Repos), Jobs: len(d.Fleet.Jobs), Spend24h: spend, LastTick: d.lastTick, LastError: d.lastErr}
+		d.mu.Unlock()
+		st.Autonomy = d.Autonomy(ctx)
+		return api.Response{Status: st}
+	case "runs":
+		runs, err := d.Store.ListRuns(ctx, req.Repo, req.Limit)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{Runs: runs}
+	case "run":
+		r, err := d.Store.GetRun(ctx, req.ID)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{Run: &r}
+	case "events":
+		r, err := d.Store.GetRun(ctx, req.ID)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		ev, err := d.Store.EventsAfter(ctx, r.ID, req.After)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{Run: &r, Events: ev}
+	case "trigger":
+		id, err := d.Trigger(ctx, req.Job, req.Repo)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{ID: id}
+	case "autonomy":
+		switch req.Value {
+		case "on", "off":
+			if err := d.Store.SetSetting(ctx, autonomyKey, req.Value); err != nil {
+				return api.Fail("%v", err)
+			}
+			d.Log.Printf("autonomy %s", req.Value)
+		case "":
+		default:
+			return api.Fail("autonomy: want on or off")
+		}
+		return api.Response{Status: &api.Status{Autonomy: d.Autonomy(ctx)}}
+	case "trust":
+		recorded, err := d.Store.ListTrust(ctx)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{Trust: Ladder(d.Fleet, recorded)}
+	}
+	return api.Fail("unknown op %q", req.Op)
+}
+
+func (d *Daemon) inFlightLocked() []string {
+	var ids []string
+	for _, id := range d.running {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// Ladder lists every repo and class with its current level, seeding unseen
+// pairs from policy. Shared with the CLI so both show the same table.
+func Ladder(f *config.Fleet, recorded []store.Trust) []store.Trust {
+	byKey := map[string]store.Trust{}
+	for _, t := range recorded {
+		byKey[t.Repo+"/"+t.Class] = t
+	}
+	l := policy.Ladder{Fleet: f}
+	var out []store.Trust
+	for _, r := range f.Repos {
+		r, _ = f.Repo(r.Name)
+		seen := map[string]bool{}
+		for _, jn := range r.Jobs {
+			j, ok := f.Job(jn)
+			if !ok || seen[j.Class] {
+				continue
+			}
+			seen[j.Class] = true
+			t, found := byKey[r.Name+"/"+j.Class]
+			out = append(out, l.Current(r, j.Class, t, found))
+		}
+	}
+	return out
+}

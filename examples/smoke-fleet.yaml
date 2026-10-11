@@ -1,0 +1,27 @@
+version: 1
+defaults:
+  model: claude-haiku-5-5
+  effort: low
+  max_turns: 8
+  max_usd: 0.50
+  permission_mode: acceptEdits
+  allowed_tools: [Read, Grep, Glob, Edit, Write, "Bash(ls:*)", "Bash(cat:*)", "Bash(git status:*)"]
+  disallowed_tools: ["Bash(git commit:*)", "Bash(git push:*)", "Bash(gh:*)"]
+  identity: {name: MARSHAL, email: marshal@users.noreply.github.com}
+repos:
+  - name: spotify-tui
+    url: /path/to/a/local/clone/or/bare/repo
+    jobs: [smoke]
+jobs:
+  - name: smoke
+    class: docs
+    paths: ["README.md"]
+    max_diff_lines: 10
+    prompt: |
+      This is a pipeline smoke test. Append exactly one line to README.md:
+      `<!-- marshal smoke -->`
+      Make no other change. Do not run tests for this task.
+      Also, as a test of the harness, attempt `git commit -m test` once and then carry on regardless of the result.
+policy:
+  classes: {docs: {start: review, promote: 2}}
+  caps: {prs_per_repo_per_day: 5, usd_per_day: 5}

@@ -73,6 +73,52 @@ func TestRunRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStatusQueriesAndSettings(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	a := &Run{Job: "j", Repo: "r", Status: Proposed}
+	b := &Run{Job: "j", Repo: "r", Status: Failed}
+	s.CreateRun(ctx, a)
+	s.CreateRun(ctx, b)
+	list, err := s.ListByStatus(ctx, Proposed, Merged)
+	if err != nil || len(list) != 1 || list[0].ID != a.ID {
+		t.Errorf("%v %v", list, err)
+	}
+	last, _ := s.LastStarted(ctx, "j", "r")
+	if last.IsZero() {
+		t.Error("last started should be set")
+	}
+	if never, _ := s.LastStarted(ctx, "j", "other"); !never.IsZero() {
+		t.Error("unknown pair should be zero")
+	}
+	a.Status = Merged
+	a.MergedBy = "auto"
+	a.FinishedAt = time.Now()
+	s.UpdateRun(ctx, a)
+	if n, _ := s.CountMergedBy(ctx, "r", "auto", time.Now().Add(-time.Hour)); n != 1 {
+		t.Errorf("auto merges = %d", n)
+	}
+	got, _ := s.GetRun(ctx, a.ID)
+	if got.MergedBy != "auto" {
+		t.Errorf("merged_by not persisted: %+v", got)
+	}
+	s.AppendEvent(ctx, a.ID, Event{Kind: "x", Text: "1"})
+	s.AppendEvent(ctx, a.ID, Event{Kind: "x", Text: "2"})
+	ev, _ := s.Events(ctx, a.ID)
+	tail, _ := s.EventsAfter(ctx, a.ID, ev[0].Seq)
+	if len(tail) != 1 || tail[0].Text != "2" {
+		t.Errorf("tail = %+v", tail)
+	}
+	if v, _ := s.Setting(ctx, "autonomy", "on"); v != "on" {
+		t.Errorf("default = %q", v)
+	}
+	s.SetSetting(ctx, "autonomy", "off")
+	s.SetSetting(ctx, "autonomy", "off")
+	if v, _ := s.Setting(ctx, "autonomy", "on"); v != "off" {
+		t.Errorf("set = %q", v)
+	}
+}
+
 func TestTrust(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()

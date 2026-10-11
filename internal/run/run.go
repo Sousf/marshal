@@ -30,6 +30,9 @@ type Options struct {
 	Log io.Writer
 	// Env is passed to the agent and to git. The run's GH_TOKEN goes here.
 	Env []string
+	// ID pre-assigns the run's identifier so a caller can hand it out before
+	// the run finishes. Empty means the store picks one.
+	ID string
 }
 
 // Executor holds what every run needs.
@@ -72,7 +75,7 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 		return store.Run{}, err
 	}
 
-	rec := &store.Run{Job: job.Name, Repo: repo.Name, Class: job.Class, Adapter: x.Adapter.Name(), Model: res.Model}
+	rec := &store.Run{ID: opts.ID, Job: job.Name, Repo: repo.Name, Class: job.Class, Adapter: x.Adapter.Name(), Model: res.Model}
 	if err := x.Store.CreateRun(ctx, rec); err != nil {
 		return store.Run{}, err
 	}

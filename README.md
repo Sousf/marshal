@@ -26,24 +26,78 @@ by a rejection or a post-merge revert.
 
 ## Status
 
-First cut. The command line runs one job against one repo and shows what
-happened. The scheduler daemon, the TUI, auto-merge and the verifier are
-the next steps, in that order.
+Working today:
 
-## Try it
+- `marshal run` executes one job in the foreground and opens a PR.
+- `marshal serve` is the daemon: fires jobs on their schedules, watches the
+  PRs they opened, moves the trust ladder when you merge or close one, and
+  merges on its own only where a class has earned `soak` or `auto` and
+  every gate agrees (CI green, no changes requested, no `hold` label, soak
+  window elapsed, daily cap not hit, kill switch on).
+- `marshal tui` shows the fleet, the runs, a live run's tool calls, and the
+  ladder, and can start a job or flip the kill switch.
 
+Not yet: a verifier agent that reads the diff before auto-merge, post-merge
+revert watch, memory-as-PR, adapters for agents other than Claude Code.
+
+## Run it yourself
+
+Requirements on the machine that runs it: Go 1.27+, `git`, `gh` logged in
+(`gh auth status`), and `claude` logged in. Both CLIs must work for the user
+that runs MARSHAL, because the daemon shells out to them.
+
+```sh
+git clone git@github.com:Sousf/marshal.git && cd marshal
+go build -o ~/.local/bin/marshal .
+
+marshal init                 # writes ~/.config/marshal/fleet.yaml
+$EDITOR ~/.config/marshal/fleet.yaml   # your repos, your caps
+marshal check
+marshal jobs                 # effective model, effort, caps per job
+marshal prompt posture-audit spotify-tui   # read the brief before you spend money
 ```
-go build -o marshal .
-./marshal init          # writes ~/.config/marshal/fleet.yaml
-$EDITOR ~/.config/marshal/fleet.yaml
-./marshal check
-./marshal prompt posture-audit spotify-tui       # see the brief
-./marshal run posture-audit spotify-tui --no-pr  # commit locally, open nothing
-./marshal runs
-./marshal show <run-id>
+
+First run, by hand, with nothing published:
+
+```sh
+marshal run posture-audit spotify-tui --no-pr --keep
+marshal runs
+marshal show <run-id>        # every tool call, denials, the report
 ```
 
-Requires `git`, `gh` (authenticated), and `claude` on PATH.
+`--no-pr` commits on a local branch inside the kept work tree and opens
+nothing. When the report looks right, drop the flags and it opens the PR.
+
+Then the daemon and the interface:
+
+```sh
+marshal serve --tick 1m      # foreground; ctrl-c stops it
+marshal                      # in another terminal: the TUI attaches
+marshal status
+marshal trigger vuln-fix spotify-tui
+marshal autonomy off         # the kill switch
+```
+
+To run it on an always-on host as a user service, see
+`packaging/marshal.service`. To look at it from your laptop, ssh in and run
+`marshal`; the daemon listens on a Unix socket, never a port.
+
+### Testing without spending
+
+`go test ./...` runs with no network and no `claude`. Everything that talks
+to an agent goes through an adapter interface, and the stream parser is
+tested against recorded output. A cheap real run is a fleet file with
+`model: claude-haiku-5-5`, `max_turns: 8`, `max_usd: 0.50` and a one-line
+job; `examples/smoke-fleet.yaml` is one; a run costs about one cent.
+
+### Trying autonomy safely
+
+Autonomy only acts on PRs MARSHAL opened, only when the PR has CI checks and
+they pass, and only once a class has earned its level. A fresh fleet starts
+every class at `review`, so nothing merges itself until you have approved
+`promote` PRs of that class in a row. `marshal trust` shows where each one
+stands. `marshal autonomy off` stops every auto-merge immediately and
+survives restarts.
 
 ## Design rules
 

@@ -6,7 +6,9 @@ library would cost more than a page of code, and never for a single helper.
 Layout: `main.go` is the CLI. Everything else is under `internal/`, one
 package per concern: `config` (fleet file), `runner` (agent adapters),
 `store` (SQLite), `workspace` (git and PRs), `policy` (diff checks and the
-trust ladder), `run` (one job end to end), `jobs` (embedded briefs).
+trust ladder), `run` (one job end to end), `jobs` (embedded briefs),
+`sched` (schedule strings), `github` (gh wrapper), `api` (Unix socket
+protocol), `daemon` (scheduler, PR sync, auto-merge), `ui` (Bubble Tea).
 
 Rules the code enforces, which no change may weaken:
 
@@ -17,6 +19,11 @@ Rules the code enforces, which no change may weaken:
 - `policy.alwaysLocked` paths cannot be unlocked by any job configuration.
 - The starter fleet in `starter.go` and `examples/fleet.yaml` stay identical;
   a test checks.
+- Only a human merge counts as an approval on the ladder. Machine merges
+  never promote.
+- Auto-merge requires CI checks to exist and pass. A repo without CI gets no
+  autonomy, whatever its level.
+- The daemon listens on a Unix socket only.
 
 Tests: `go test ./...` must pass with no network and no `claude` binary.
 Anything that talks to an agent goes through `runner.Adapter` so tests can
