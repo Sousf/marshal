@@ -29,6 +29,7 @@ import (
 	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
+	"github.com/Sousf/marshal/internal/notify"
 	"github.com/Sousf/marshal/internal/run"
 	"github.com/Sousf/marshal/internal/runner"
 	"github.com/Sousf/marshal/internal/store"
@@ -67,6 +68,8 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
   marshal trust                   where each repo and class sits on the ladder
   marshal status                  is the daemon up, is autonomy on, what is running
   marshal autonomy on|off         the kill switch: off stops every auto-merge
+  marshal notify test             send a test notification through the configured channels
+  marshal digest                  print the daily summary
   marshal app create [--name N]   create and install the MARSHAL GitHub App (two clicks in a browser)
   marshal app status              which repositories the app installation can reach
   marshal version
@@ -171,6 +174,38 @@ func app(args []string) error {
 		return cmdVerify(ctx, fleet, rest)
 	case "app":
 		return cmdApp(ctx, fleet, rest)
+	case "notify":
+		if len(rest) != 1 || rest[0] != "test" {
+			return errors.New("usage: marshal notify test")
+		}
+		n, err := notify.New(fleet.Notify)
+		if err != nil {
+			return err
+		}
+		if n == nil {
+			return errors.New("no notify channels configured; add notify.ntfy, notify.telegram or notify.webhook to the fleet file")
+		}
+		var failed []string
+		n.Log = func(f string, a ...any) { failed = append(failed, fmt.Sprintf(f, a...)) }
+		_ = n.Send(ctx, notify.Event{Kind: notify.Test, Title: "test", Body: "If you can read this, MARSHAL can reach you.", URL: "https://github.com/Sousf/marshal"})
+		if len(failed) > 0 {
+			return errors.New(strings.Join(failed, "\n"))
+		}
+		fmt.Println("sent")
+		return nil
+	case "digest":
+		st, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		d := &daemon.Daemon{Fleet: fleet, Store: st}
+		text, err := d.DigestText(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Println(text)
+		return nil
 	case "stop":
 		return cmdStop()
 	case "logs":
@@ -415,7 +450,17 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	} else {
 		logger.Printf("acting as the host's gh login; set github_app in the fleet file for a bot identity")
 	}
-	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule}
+	n, err := notify.New(f.Notify)
+	if err != nil {
+		return err
+	}
+	if n != nil {
+		n.Log = logger.Printf
+		logger.Printf("notifications on")
+	} else {
+		logger.Printf("no notify channels configured; events go to this log only")
+	}
+	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule, Notify: n}
 	if !d.Adapter.Available() {
 		logger.Printf("warning: %s is not on PATH; scheduled runs will fail until it is", "claude")
 	}

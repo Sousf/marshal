@@ -8,6 +8,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -16,12 +18,14 @@ import (
 	"github.com/Sousf/marshal/internal/config"
 	"github.com/Sousf/marshal/internal/ghapp"
 	"github.com/Sousf/marshal/internal/github"
+	"github.com/Sousf/marshal/internal/notify"
 	"github.com/Sousf/marshal/internal/policy"
 	"github.com/Sousf/marshal/internal/run"
 	"github.com/Sousf/marshal/internal/runner"
 	"github.com/Sousf/marshal/internal/sched"
 	"github.com/Sousf/marshal/internal/store"
 	"github.com/Sousf/marshal/internal/verifier"
+	"github.com/Sousf/marshal/internal/workspace"
 )
 
 // GitHub is what the daemon needs from GitHub, as an interface so tests can
@@ -35,6 +39,8 @@ type GitHub interface {
 	DefaultBranch(ctx context.Context, slug string) (string, error)
 	FailedLogs(ctx context.Context, slug, sha string, limit int) (string, error)
 	HumanComments(ctx context.Context, url, exclude string, since time.Time) ([]github.Comment, error)
+	CommitCI(ctx context.Context, slug, sha string) (github.CI, bool, error)
+	CreatePR(ctx context.Context, slug, head, base, title, body string, labels []string) (string, error)
 }
 
 // Daemon holds the loop's state.
@@ -54,6 +60,8 @@ type Daemon struct {
 	// NoSchedule keeps the daemon from starting jobs on its own. It still
 	// syncs proposals, verifies, merges where trusted, and takes triggers.
 	NoSchedule bool
+	// Notify is where events go. nil is fine.
+	Notify *notify.Multi
 
 	mu        sync.Mutex
 	running   map[string]string // repo -> run ID
@@ -106,6 +114,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if d.NoSchedule {
 		d.Log.Printf("scheduler off: jobs start only by trigger")
 	}
+	d.Reconcile(ctx)
 	t := time.NewTicker(tick)
 	defer t.Stop()
 	d.tick(ctx)
@@ -127,6 +136,41 @@ func (d *Daemon) Run(ctx context.Context) error {
 	}
 }
 
+// Reconcile cleans up after a daemon that did not shut down cleanly. Any run
+// still marked running belongs to a process that no longer exists, and any
+// work tree on disk is an orphan, because every live run holds its own and
+// removes it on exit.
+func (d *Daemon) Reconcile(ctx context.Context) {
+	d.init()
+	ids, err := d.Store.CancelRunning(ctx, "daemon restarted while the run was in progress")
+	if err != nil {
+		d.fail("reconcile: %v", err)
+	}
+	for _, id := range ids {
+		_ = d.Store.AppendEvent(ctx, id, store.Event{Kind: "note", Text: "cancelled: the daemon restarted while this run was in progress"})
+		d.Log.Printf("run %s: cancelled, the daemon restarted while it was in progress", id)
+	}
+	root := d.WorkRoot
+	if root == "" {
+		root = filepath.Join(config.StateDir(), "work")
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return
+	}
+	swept := 0
+	for _, e := range entries {
+		if e.IsDir() && (strings.HasPrefix(e.Name(), "run-") || strings.HasPrefix(e.Name(), "verify-")) {
+			if os.RemoveAll(filepath.Join(root, e.Name())) == nil {
+				swept++
+			}
+		}
+	}
+	if swept > 0 {
+		d.Log.Printf("reconcile: removed %d orphaned work tree(s) under %s", swept, root)
+	}
+}
+
 // tick is one pass: settle what humans decided, merge what may merge, start
 // what is due.
 func (d *Daemon) tick(ctx context.Context) {
@@ -137,6 +181,10 @@ func (d *Daemon) tick(ctx context.Context) {
 	if err := d.syncProposals(ctx); err != nil {
 		d.fail("sync: %v", err)
 	}
+	if err := d.watchMerges(ctx); err != nil {
+		d.fail("watch: %v", err)
+	}
+	d.maybeDigest(ctx)
 	if d.NoSchedule {
 		return
 	}
@@ -186,9 +234,12 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 				r.MergedBy = "human"
 			}
 			r.Feedback = d.feedback(ctx, r)
+			r.MergeSHA = pr.MergeSHA
 			d.note(ctx, r.ID, "merged by %s", r.MergedBy)
 			if r.MergedBy == "human" {
 				d.move(ctx, ladder, repo, r.Class, policy.Approved)
+				r.Settled = true // a human merge is not watched
+				d.send(ctx, notify.Event{Kind: notify.Merged, Title: r.Repo + ": merged by you", Body: r.Job + " · " + firstLine(r.Summary), URL: r.PRURL})
 			}
 		case pr.Closed():
 			r.Status = store.Rejected
@@ -243,8 +294,12 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			r.Status = store.Merged
 			r.MergedBy = by
 			r.FinishedAt = d.now()
-			d.note(ctx, r.ID, "merged by marshal (%s)", by)
-			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("Merged by MARSHAL: class `%s` is at level `%s` for this repository, checks were green, the verifier passed head `%s`, and the %s gate passed.", r.Class, by, short(verdict.Head), by))
+			if after, err := d.GH.ViewPR(ctx, r.PRURL); err == nil {
+				r.MergeSHA = after.MergeSHA
+			}
+			d.note(ctx, r.ID, "merged by marshal (%s); watching the default branch", by)
+			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("Merged by MARSHAL: class `%s` is at level `%s` for this repository, checks were green, the verifier passed head `%s`, and the %s gate passed. MARSHAL watches the default branch and reverts if it goes red.", r.Class, by, short(verdict.Head), by))
+			d.send(ctx, notify.Event{Kind: notify.Merged, Title: r.Repo + ": merged by MARSHAL (" + by + ")", Body: r.Job + " · " + firstLine(r.Summary), URL: r.PRURL})
 		}
 		if err := d.Store.UpdateRun(ctx, &r); err != nil {
 			return err
@@ -359,6 +414,7 @@ func (d *Daemon) addressReview(ctx context.Context, repo config.Repo, r store.Ru
 			d.note(ctx, r.ID, "review feedback after %d follow-up(s); handing to a human", attempts)
 			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("MARSHAL has made %d follow-up(s) on this pull request and stopped at the cap. The remaining feedback needs a human.", attempts))
 			_ = d.GH.AddLabel(ctx, r.PRURL, "marshal:needs-human")
+			d.send(ctx, notify.Event{Kind: notify.NeedsHuman, Title: r.Repo + ": review feedback waiting after " + fmt.Sprint(attempts) + " follow-up(s)", Body: r.Job + " · " + pr.Title, URL: r.PRURL})
 		}
 		return
 	}
@@ -439,6 +495,7 @@ func (d *Daemon) fixChecks(ctx context.Context, repo config.Repo, r store.Run, p
 			d.note(ctx, r.ID, "checks still failing after %d fix attempt(s); handing to a human", attempts)
 			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("MARSHAL tried %d time(s) to make the checks pass on this pull request and stopped at the cap. It needs a human.", attempts))
 			_ = d.GH.AddLabel(ctx, r.PRURL, "marshal:needs-human")
+			d.send(ctx, notify.Event{Kind: notify.NeedsHuman, Title: r.Repo + ": checks still failing after " + fmt.Sprint(attempts) + " fix attempt(s)", Body: r.Job + " · " + pr.Title, URL: r.PRURL})
 		}
 		return
 	}
@@ -532,9 +589,223 @@ func (d *Daemon) startFix(ctx context.Context, repo config.Repo, r store.Run, pr
 				msg = rec.Error
 			}
 			_ = d.GH.CommentPR(d.base, r.PRURL, fmt.Sprintf("MARSHAL could not fix the failing checks (run `%s`, %s).\n\n%s", id, rec.Status, msg))
+			if rec.Status != store.NoChange {
+				d.send(d.base, notify.Event{Kind: notify.Failed, Title: repo.Name + ": fix attempt " + string(rec.Status), Body: firstLine(msg), URL: r.PRURL})
+			}
 		}
 	}()
 	return id, nil
+}
+
+// send delivers a notification if any channel is configured.
+func (d *Daemon) send(ctx context.Context, e notify.Event) {
+	if d.Notify == nil {
+		return
+	}
+	_ = d.Notify.Send(ctx, e)
+}
+
+// watchMerges is the safety net under autonomous merges: for each merge
+// MARSHAL made on its own, watch the default branch's CI on the merge
+// commit. Green settles it. Red reverts it, as a PR the app merges at once,
+// and demotes the class two steps. Silence past the window settles it too;
+// a repo without CI never reaches auto in the first place.
+func (d *Daemon) watchMerges(ctx context.Context) error {
+	runs, err := d.Store.Unsettled(ctx)
+	if err != nil {
+		return err
+	}
+	ladder := policy.Ladder{Fleet: d.Fleet}
+	for _, r := range runs {
+		repo, ok := d.Fleet.Repo(r.Repo)
+		if !ok {
+			continue
+		}
+		hours := d.Fleet.Policy.Classes[r.Class].SoakHours
+		if hours <= 0 {
+			hours = 24
+		}
+		window := time.Duration(hours) * time.Hour
+		if r.MergeSHA == "" {
+			pr, err := d.GH.ViewPR(ctx, r.PRURL)
+			if err != nil || pr.MergeSHA == "" {
+				if d.now().Sub(r.FinishedAt) > window {
+					r.Settled = true
+					_ = d.Store.UpdateRun(ctx, &r)
+				}
+				continue
+			}
+			r.MergeSHA = pr.MergeSHA
+		}
+		slug := repo.GitHub
+		if slug == "" {
+			slug, _ = github.Slug(repo.URL)
+		}
+		ci, found, err := d.GH.CommitCI(ctx, slug, r.MergeSHA)
+		if err != nil {
+			d.fail("run %s: watch: %v", r.ID, err)
+			continue
+		}
+		switch {
+		case found && ci.Red():
+			d.revert(ctx, ladder, repo, r, ci)
+		case found && ci.Status == "completed":
+			r.Settled = true
+			d.note(ctx, r.ID, "default branch green on %s; settled", short(r.MergeSHA))
+			_ = d.Store.UpdateRun(ctx, &r)
+		case d.now().Sub(r.FinishedAt) > window:
+			r.Settled = true
+			d.note(ctx, r.ID, "watch window passed with no verdict from CI; settled")
+			_ = d.Store.UpdateRun(ctx, &r)
+		default:
+			_ = d.Store.UpdateRun(ctx, &r) // persists MergeSHA
+		}
+	}
+	return nil
+}
+
+// revert undoes a machine merge whose commit turned the default branch red.
+func (d *Daemon) revert(ctx context.Context, ladder policy.Ladder, repo config.Repo, r store.Run, ci github.CI) {
+	d.note(ctx, r.ID, "default branch red on %s (%s); reverting", short(r.MergeSHA), ci.URL)
+	var env []string
+	identity := d.Fleet.Defaults.Identity
+	cloneRepo := repo
+	if d.Auth != nil {
+		e, err := d.Auth.Env(ctx, ghapp.Full)
+		if err != nil {
+			d.fail("run %s: revert: %v", r.ID, err)
+			return
+		}
+		env = e
+		identity = d.Auth.Identity()
+		cloneRepo.URL = ghapp.CloneURL(repo)
+	}
+	root := d.WorkRoot
+	if root == "" {
+		root = filepath.Join(config.StateDir(), "work")
+	}
+	ws, err := workspace.Prepare(ctx, root, cloneRepo, "revert", r.ID, identity, env)
+	if err != nil {
+		d.fail("run %s: revert: %v", r.ID, err)
+		return
+	}
+	defer ws.Remove()
+	title := fmt.Sprintf("Revert MARSHAL merge %s (%s)", short(r.MergeSHA), r.Job)
+	body := fmt.Sprintf("MARSHAL merged %s on its own and the default branch's CI then failed on that commit: %s\n\nThis reverts it. The `%s` class on this repository has been demoted.", r.PRURL, ci.URL, r.Class)
+	if err := ws.Revert(ctx, r.MergeSHA, title+"\n\n"+body); err != nil {
+		d.fail("run %s: %v", r.ID, err)
+		d.send(ctx, notify.Event{Kind: notify.Reverted, Title: repo.Name + ": default branch red and the revert conflicts", Body: err.Error(), URL: ci.URL, Urgent: true})
+		r.Settled = true
+		_ = d.Store.UpdateRun(ctx, &r)
+		d.move(ctx, ladder, repo, r.Class, policy.Reverted)
+		return
+	}
+	if err := ws.Push(ctx); err != nil {
+		d.fail("run %s: revert push: %v", r.ID, err)
+		return
+	}
+	slug := repo.GitHub
+	if slug == "" {
+		slug, _ = github.Slug(repo.URL)
+	}
+	url, err := d.GH.CreatePR(ctx, slug, ws.Branch, ws.Repo.Branch, title, body, []string{run.Label, "marshal:revert"})
+	if err != nil {
+		d.fail("run %s: revert PR: %v", r.ID, err)
+		return
+	}
+	merged := d.GH.MergePR(ctx, url) == nil
+	if !merged {
+		_ = d.GH.AddLabel(ctx, url, "marshal:needs-human")
+	}
+	r.Status = store.Reverted
+	r.Settled = true
+	_ = d.Store.UpdateRun(ctx, &r)
+	d.move(ctx, ladder, repo, r.Class, policy.Reverted)
+	state := "merged"
+	if !merged {
+		state = "opened but could not be merged; it needs a human"
+	}
+	d.note(ctx, r.ID, "revert PR %s %s", url, state)
+	_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("MARSHAL reverted this merge: the default branch went red on %s. Revert: %s (%s). The `%s` class has been demoted.", short(r.MergeSHA), url, state, r.Class))
+	d.send(ctx, notify.Event{Kind: notify.Reverted, Title: repo.Name + ": autonomous merge reverted", Body: r.Job + " · revert " + state, URL: url, Urgent: true})
+}
+
+// maybeDigest sends the daily summary once per day at the configured time.
+func (d *Daemon) maybeDigest(ctx context.Context) {
+	if d.Notify == nil || !d.Notify.Wants(notify.Digest) {
+		return
+	}
+	at := d.Fleet.Notify.Digest
+	if at == "" {
+		at = "08:00"
+	}
+	now := d.now()
+	due, err := time.ParseInLocation("15:04", at, now.Location())
+	if err != nil {
+		return
+	}
+	due = time.Date(now.Year(), now.Month(), now.Day(), due.Hour(), due.Minute(), 0, 0, now.Location())
+	if now.Before(due) {
+		return
+	}
+	today := now.Format("2006-01-02")
+	if last, _ := d.Store.Setting(ctx, "digest_last", ""); last == today {
+		return
+	}
+	text, err := d.DigestText(ctx)
+	if err != nil {
+		d.fail("digest: %v", err)
+		return
+	}
+	d.send(ctx, notify.Event{Kind: notify.Digest, Title: "daily digest", Body: text})
+	_ = d.Store.SetSetting(ctx, "digest_last", today)
+}
+
+// DigestText renders the last 24 hours. Usable on a bare Daemon, as the
+// CLI does, so it initialises itself.
+func (d *Daemon) DigestText(ctx context.Context) (string, error) {
+	d.init()
+	sum, err := d.Store.Summarise(ctx, d.now().Add(-24*time.Hour))
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d run(s), $%.2f", sum.Runs, sum.Spend)
+	var parts []string
+	for _, st := range []store.Status{store.Merged, store.Proposed, store.Pushed, store.NoChange, store.Rejected, store.Reverted, store.Failed, store.Blocked, store.Cancelled} {
+		if n := sum.ByStatus[st]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, st))
+		}
+	}
+	if len(parts) > 0 {
+		b.WriteString(": " + strings.Join(parts, ", "))
+	}
+	b.WriteString("\n")
+	if len(sum.Proposals) == 0 {
+		b.WriteString("Nothing is waiting for you.\n")
+	} else {
+		fmt.Fprintf(&b, "Waiting for you: %d\n", len(sum.Proposals))
+		for _, p := range sum.Proposals {
+			fmt.Fprintf(&b, "- %s %s (%s) %s\n", p.Repo, p.Job, ago(p.StartedAt, d.now()), p.PRURL)
+		}
+	}
+	auto := "on"
+	if !d.Autonomy(ctx) {
+		auto = "OFF"
+	}
+	fmt.Fprintf(&b, "Autonomy %s.", auto)
+	return b.String(), nil
+}
+
+func ago(t, now time.Time) string {
+	d := now.Sub(t)
+	switch {
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 48*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
 }
 
 // startVerify runs the verifier for a proposal in the background, once per
@@ -583,6 +854,7 @@ func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
 			if err := d.GH.AddLabel(bg, r.PRURL, "marshal:needs-human"); err != nil {
 				d.fail("run %s: label: %v", r.ID, err)
 			}
+			d.send(bg, notify.Event{Kind: notify.NeedsHuman, Title: r.Repo + ": verifier said " + res.Verdict.Verdict, Body: firstLine(res.Summary), URL: r.PRURL, Urgent: res.Verdict.Verdict == verifier.Fail})
 		}
 	}()
 }
@@ -765,6 +1037,12 @@ func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) 
 		switch rec.Status {
 		case store.Failed, store.Blocked, store.Cancelled:
 			d.Log.Printf("run %s: %s: %s", id, rec.Status, firstLine(rec.Error))
+			if rec.Status != store.Cancelled {
+				d.send(d.base, notify.Event{Kind: notify.Failed, Title: repo + ": " + job + " " + string(rec.Status), Body: firstLine(rec.Error), URL: rec.PRURL})
+			}
+		case store.Proposed:
+			d.Log.Printf("run %s: %s %s", id, rec.Status, rec.PRURL)
+			d.send(d.base, notify.Event{Kind: notify.Proposed, Title: repo + ": PR opened by " + job, Body: firstLine(rec.Summary), URL: rec.PRURL})
 		default:
 			d.Log.Printf("run %s: %s %s", id, rec.Status, rec.PRURL)
 		}

@@ -161,6 +161,41 @@ func TestPrepareExistingAndPush(t *testing.T) {
 	}
 }
 
+func TestRevert(t *testing.T) {
+	ctx := context.Background()
+	src := origin(t)
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = src
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	os.WriteFile(filepath.Join(src, "go.mod"), []byte("module x\n\nbad\n"), 0o644)
+	run("commit", "-q", "-am", "break it")
+	bad := run("rev-parse", "HEAD")
+	w, err := Prepare(ctx, t.TempDir(), config.Repo{Name: "x", URL: src}, "revert", "r9", config.Identity{Name: "M", Email: "m@m.invalid"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove()
+	if err := w.Revert(ctx, bad, "Revert \"break it\""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(w.Dir, "go.mod")); string(b) != "module x\n" {
+		t.Errorf("revert did not restore the file: %q", b)
+	}
+	if err := w.Revert(ctx, "0000000000000000000000000000000000000000", "x"); err == nil {
+		t.Error("reverting a missing commit must fail cleanly")
+	}
+	if ch, _ := w.Changed(ctx); ch {
+		t.Error("a failed revert must leave the tree clean")
+	}
+}
+
 func TestPrepareBadURL(t *testing.T) {
 	_, err := Prepare(context.Background(), t.TempDir(), config.Repo{Name: "x", URL: filepath.Join(t.TempDir(), "nope"), Branch: "main"}, "j", "r", config.Identity{}, nil)
 	if err == nil {

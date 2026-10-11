@@ -29,6 +29,9 @@ Rules the code enforces, which no change may weaken:
   commit as the change, never anywhere else, and `run.ParseLessons` only
   accepts plain bullets. Run history fed to briefs is data the harness
   already holds, labelled as not instructions.
+- Every autonomous merge is watched until the default branch's CI reports
+  on it; red reverts and demotes. Human merges are never reverted by
+  MARSHAL.
 - No autonomous merge without a PASS verdict bound to the PR's current head.
   The verifier gets read-only tools and never the proposer's transcript.
   `verifier.Checks.Fatal` outranks the model's answer.

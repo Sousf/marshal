@@ -28,7 +28,13 @@ type fakeGH struct {
 	ci       github.CI
 	// humanComments is what HumanComments returns per PR url.
 	humanComments map[string][]github.Comment
+	// commitCI is what CommitCI reports; commitCINone means no runs exist.
+	commitCI     github.CI
+	commitCINone bool
+	created      []createdPR
 }
+
+type createdPR struct{ slug, head, base, title string }
 
 func (g *fakeGH) ViewPR(_ context.Context, url string) (github.PR, error) {
 	g.mu.Lock()
@@ -74,6 +80,20 @@ func (g *fakeGH) HumanComments(_ context.Context, url, _ string, since time.Time
 		}
 	}
 	return out, nil
+}
+func (g *fakeGH) CommitCI(context.Context, string, string) (github.CI, bool, error) {
+	if g.commitCINone {
+		return github.CI{}, false, nil
+	}
+	return g.commitCI, true, nil
+}
+func (g *fakeGH) CreatePR(_ context.Context, slug, head, base, title, body string, labels []string) (string, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.created = append(g.created, createdPR{slug, head, base, title})
+	url := "revert-" + head
+	g.prs[url] = github.PR{State: "OPEN", Title: title}
+	return url, nil
 }
 func (g *fakeGH) FailedLogs(context.Context, string, string, int) (string, error) {
 	return "## ci (run 1): failure\n\n```\nFAIL: TestX\n```\n", nil

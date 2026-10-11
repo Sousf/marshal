@@ -112,6 +112,15 @@ policy:
     max_usd: 2.00
     always: false
 
+# Where to hear about events. Any subset; events defaults to everything but
+# merged; digest is a local time of day.
+# notify:
+#   ntfy: {url: https://ntfy.sh/your-private-topic}
+#   telegram: {bot_token: "123:abc", chat_id: "123456"}
+#   webhook: https://example.invalid/hook
+#   events: [proposed, needs-human, failed, reverted, digest]
+#   digest: "08:00"
+
 # Act as a GitHub App instead of your own gh login, so PRs and merges carry
 # the app's identity and branch protection can require your review of them.
 # Create the app at https://github.com/settings/apps/new (see README), install

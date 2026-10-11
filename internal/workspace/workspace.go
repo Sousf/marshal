@@ -151,6 +151,16 @@ func PrepareHead(ctx context.Context, root string, repo config.Repo, runID, head
 	return w, nil
 }
 
+// Revert creates a commit undoing sha on the current branch. A conflict is
+// returned as an error with git's explanation; nothing is left half done.
+func (w *Workspace) Revert(ctx context.Context, sha, message string) error {
+	if _, err := w.git(ctx, "revert", "--no-edit", "--no-commit", sha); err != nil {
+		_, _ = w.git(ctx, "revert", "--abort")
+		return fmt.Errorf("revert %s: %w", sha, err)
+	}
+	return w.Commit(ctx, message)
+}
+
 // HeadSHA returns the checked-out commit.
 func (w *Workspace) HeadSHA(ctx context.Context) (string, error) {
 	out, err := w.git(ctx, "rev-parse", "HEAD")

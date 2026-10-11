@@ -31,6 +31,7 @@ const (
 	Pushed    Status = "pushed"    // follow-up pushed to an existing PR
 	Proposed  Status = "proposed"  // PR opened, awaiting review or soak
 	Merged    Status = "merged"
+	Reverted  Status = "reverted" // merged by MARSHAL, then reverted by MARSHAL
 	Rejected  Status = "rejected" // operator closed the PR
 	Blocked   Status = "blocked"  // policy refused the diff
 	Failed    Status = "failed"   // agent or harness error
@@ -63,6 +64,11 @@ type Run struct {
 	// Feedback is what humans said on the PR, captured when it closed, and
 	// fed into later briefs for the same job.
 	Feedback string
+	// MergeSHA is the commit the PR became on the default branch. Settled
+	// is set once the revert watch has seen that commit's CI finish green,
+	// or the watch window has passed.
+	MergeSHA string
+	Settled  bool
 	// Summary is the agent's final report; the PR body.
 	Summary string
 	// Error explains Failed or Blocked.
@@ -197,6 +203,8 @@ func (s *Store) migrate() error {
 		`ALTER TABLE runs ADD COLUMN parent TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN base_head TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN feedback TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN merge_sha TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN settled INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -240,8 +248,8 @@ func (s *Store) UpdateRun(ctx context.Context, r *Run) error {
 		fin = r.FinishedAt.Unix()
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=?, turns=?,
-		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=?, feedback=? WHERE id=?`,
-		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.Feedback, r.ID)
+		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=?, feedback=?, merge_sha=?, settled=? WHERE id=?`,
+		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.Feedback, r.MergeSHA, r.Settled, r.ID)
 	if err != nil {
 		return err
 	}
@@ -265,14 +273,14 @@ func (s *Store) AppendEvent(ctx context.Context, runID string, e Event) error {
 var ErrNotFound = errors.New("not found")
 
 const runCols = `id, job, repo, class, adapter, model, status, started_at, finished_at,
-	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head, feedback`
+	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head, feedback, merge_sha, settled`
 
 func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var r Run
 	var started int64
 	var finished sql.NullInt64
 	err := sc.Scan(&r.ID, &r.Job, &r.Repo, &r.Class, &r.Adapter, &r.Model, &r.Status,
-		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead, &r.Feedback)
+		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead, &r.Feedback, &r.MergeSHA, &r.Settled)
 	if err != nil {
 		return r, err
 	}
@@ -366,6 +374,87 @@ func (s *Store) ListByStatus(ctx context.Context, statuses ...Status) ([]Run, er
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// Unsettled returns runs MARSHAL merged on its own that the revert watch
+// has not yet closed out.
+func (s *Store) Unsettled(ctx context.Context) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+runCols+` FROM runs
+		WHERE status=? AND merged_by IN ('auto','soak') AND settled=0 ORDER BY finished_at`, Merged)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CancelRunning marks every run still "running" as cancelled with the given
+// reason. For startup, when anything still running belongs to a daemon
+// that no longer exists. Returns the affected IDs.
+func (s *Store) CancelRunning(ctx context.Context, reason string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM runs WHERE status=?`, Running)
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	_, err = s.db.ExecContext(ctx, `UPDATE runs SET status=?, error=?, finished_at=? WHERE status=?`,
+		Cancelled, reason, time.Now().Unix(), Running)
+	return ids, err
+}
+
+// Summary is the shape of a day for the digest.
+type Summary struct {
+	Runs      int
+	ByStatus  map[Status]int
+	Spend     float64
+	Proposals []Run // open proposals, oldest first
+}
+
+// Summarise counts runs since t and lists open proposals.
+func (s *Store) Summarise(ctx context.Context, since time.Time) (Summary, error) {
+	sum := Summary{ByStatus: map[Status]int{}}
+	rows, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*), SUM(cost_usd) FROM runs WHERE started_at>=? GROUP BY status`, since.Unix())
+	if err != nil {
+		return sum, err
+	}
+	for rows.Next() {
+		var st Status
+		var n int
+		var usd sql.NullFloat64
+		if err := rows.Scan(&st, &n, &usd); err != nil {
+			rows.Close()
+			return sum, err
+		}
+		sum.ByStatus[st] = n
+		sum.Runs += n
+		sum.Spend += usd.Float64
+	}
+	rows.Close()
+	if vs, err := s.VerdictSpendSince(ctx, since); err == nil {
+		sum.Spend += vs
+	}
+	sum.Proposals, err = s.ListByStatus(ctx, Proposed)
+	return sum, err
 }
 
 // ListByRepoJob returns the latest runs of one job on one repo, newest

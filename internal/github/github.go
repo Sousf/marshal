@@ -49,6 +49,8 @@ type PR struct {
 	BaseRef string
 	Title   string
 	Body    string
+	// MergeSHA is the merge commit once merged.
+	MergeSHA string
 }
 
 // Merged reports whether the PR was merged.
@@ -89,12 +91,15 @@ type prJSON struct {
 	BaseRefName string `json:"baseRefName"`
 	Title       string `json:"title"`
 	Body        string `json:"body"`
+	MergeCommit struct {
+		Oid string `json:"oid"`
+	} `json:"mergeCommit"`
 }
 
 // ViewPR fetches a pull request by URL.
 func (c Client) ViewPR(ctx context.Context, url string) (PR, error) {
 	out, err := c.gh(ctx, "pr", "view", url, "--json",
-		"number,state,mergedAt,closedAt,reviewDecision,mergedBy,labels,statusCheckRollup,headRefOid,headRefName,baseRefName,title,body")
+		"number,state,mergedAt,closedAt,reviewDecision,mergedBy,labels,statusCheckRollup,headRefOid,headRefName,baseRefName,title,body,mergeCommit")
 	if err != nil {
 		return PR{}, err
 	}
@@ -104,7 +109,7 @@ func (c Client) ViewPR(ctx context.Context, url string) (PR, error) {
 	}
 	p := PR{URL: url, Number: j.Number, State: j.State, MergedAt: j.MergedAt, ClosedAt: j.ClosedAt,
 		Review: j.ReviewDecision, MergedBy: j.MergedBy.Login, HeadSHA: j.HeadRefOid, HeadRef: j.HeadRefName,
-		BaseRef: j.BaseRefName, Title: j.Title, Body: j.Body}
+		BaseRef: j.BaseRefName, Title: j.Title, Body: j.Body, MergeSHA: j.MergeCommit.Oid}
 	for _, l := range j.Labels {
 		p.Labels = append(p.Labels, l.Name)
 	}
@@ -155,6 +160,22 @@ func (c Client) AddLabel(ctx context.Context, url, label string) error {
 	return err
 }
 
+// CreatePR opens a pull request on slug from head into base and returns
+// its URL. Used for reverts, which are made from a clone that gh cannot
+// resolve a repository from.
+func (c Client) CreatePR(ctx context.Context, slug, head, base, title, body string, labels []string) (string, error) {
+	args := []string{"pr", "create", "--repo", slug, "--head", head, "--base", base, "--title", title, "--body", body}
+	for _, l := range labels {
+		_, _ = c.gh(ctx, "label", "create", l, "--repo", slug, "--color", "5319e7", "--description", "Opened by MARSHAL")
+		args = append(args, "--label", l)
+	}
+	out, err := c.gh(ctx, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // CommentPR posts a comment.
 func (c Client) CommentPR(ctx context.Context, url, body string) error {
 	_, err := c.gh(ctx, "pr", "comment", url, "--body", body)
@@ -199,6 +220,39 @@ func (c Client) LatestCI(ctx context.Context, slug, branch string) (CI, bool, er
 	}
 	r := runs[0]
 	return CI{Status: r.Status, Conclusion: r.Conclusion, URL: r.URL, UpdatedAt: r.UpdatedAt}, true, nil
+}
+
+// CommitCI summarises every workflow run for one commit: red if any
+// completed run failed, pending if any is still going, green if all
+// completed well. ok is false when no run exists for the commit.
+func (c Client) CommitCI(ctx context.Context, slug, sha string) (CI, bool, error) {
+	out, err := c.gh(ctx, "run", "list", "--repo", slug, "--commit", sha, "--limit", "20", "--json", "status,conclusion,url,updatedAt")
+	if err != nil {
+		return CI{}, false, err
+	}
+	var runs []struct {
+		Status     string    `json:"status"`
+		Conclusion string    `json:"conclusion"`
+		URL        string    `json:"url"`
+		UpdatedAt  time.Time `json:"updatedAt"`
+	}
+	if err := json.Unmarshal(out, &runs); err != nil {
+		return CI{}, false, fmt.Errorf("gh run list: %w", err)
+	}
+	if len(runs) == 0 {
+		return CI{}, false, nil
+	}
+	agg := CI{Status: "completed", Conclusion: "success"}
+	for _, r := range runs {
+		one := CI{Status: r.Status, Conclusion: r.Conclusion, URL: r.URL, UpdatedAt: r.UpdatedAt}
+		switch {
+		case one.Red():
+			return one, true, nil
+		case one.Status != "completed":
+			agg = CI{Status: one.Status, URL: one.URL, UpdatedAt: one.UpdatedAt}
+		}
+	}
+	return agg, true, nil
 }
 
 // FailedLogs returns the failed-step logs of the workflow runs for a commit,

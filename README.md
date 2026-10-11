@@ -59,8 +59,18 @@ Working today:
   on a repo, including what a reviewer said when closing one, go into the
   next brief as history.
 
-Not yet: post-merge revert watch, adapters for agents other than Claude
-Code.
+- Revert watch. Every merge MARSHAL made on its own is watched: once the
+  default branch's CI reports on the merge commit, green settles it and red
+  reverts it, as a PR the app merges at once, with the class demoted two
+  steps and an urgent notification. Human merges are not watched.
+- Crash recovery. On start the daemon cancels runs a previous daemon left
+  "running" and removes orphaned work trees.
+- Notifications. ntfy, Telegram or a webhook, chosen per event kind, plus a
+  daily digest at a configured time. `marshal notify test` proves the
+  channel; `marshal digest` prints the summary.
+
+Not yet: adapters for agents other than Claude Code, a review screen in the
+interface, a posture score per repository.
 
 ## Run it yourself
 

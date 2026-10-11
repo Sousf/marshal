@@ -135,6 +135,53 @@ func TestFollowups(t *testing.T) {
 	}
 }
 
+func TestCancelRunningUnsettledSummary(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	r1 := &Run{Job: "j", Repo: "r", Status: Running}
+	r2 := &Run{Job: "j", Repo: "r", Status: Running}
+	r3 := &Run{Job: "j", Repo: "r", Status: Proposed}
+	for _, r := range []*Run{r1, r2, r3} {
+		s.CreateRun(ctx, r)
+	}
+	ids, err := s.CancelRunning(ctx, "daemon restarted")
+	if err != nil || len(ids) != 2 {
+		t.Fatalf("%v %v", ids, err)
+	}
+	got, _ := s.GetRun(ctx, r1.ID)
+	if got.Status != Cancelled || got.Error != "daemon restarted" || got.FinishedAt.IsZero() {
+		t.Errorf("%+v", got)
+	}
+	if again, _ := s.CancelRunning(ctx, "x"); len(again) != 0 {
+		t.Error("nothing left to cancel")
+	}
+
+	m := &Run{Job: "j", Repo: "r", Status: Merged}
+	s.CreateRun(ctx, m)
+	m.MergedBy = "auto"
+	m.MergeSHA = "abc"
+	m.FinishedAt = time.Now()
+	s.UpdateRun(ctx, m)
+	h := &Run{Job: "j", Repo: "r", Status: Merged}
+	s.CreateRun(ctx, h)
+	h.MergedBy = "human"
+	s.UpdateRun(ctx, h)
+	un, _ := s.Unsettled(ctx)
+	if len(un) != 1 || un[0].ID != m.ID || un[0].MergeSHA != "abc" {
+		t.Errorf("unsettled = %+v", un)
+	}
+	m.Settled = true
+	s.UpdateRun(ctx, m)
+	if un, _ := s.Unsettled(ctx); len(un) != 0 {
+		t.Error("settled runs drop out")
+	}
+
+	sum, err := s.Summarise(ctx, time.Now().Add(-time.Hour))
+	if err != nil || sum.Runs != 5 || sum.ByStatus[Cancelled] != 2 || len(sum.Proposals) != 1 {
+		t.Errorf("%+v %v", sum, err)
+	}
+}
+
 func TestVerdicts(t *testing.T) {
 	s := open(t)
 	ctx := context.Background()

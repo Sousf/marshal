@@ -52,6 +52,8 @@ type Fleet struct {
 	// GitHubApp, when set, makes MARSHAL act as a GitHub App installation
 	// instead of the host user's gh login.
 	GitHubApp GitHubApp `yaml:"github_app"`
+	// Notify is where the operator hears about events.
+	Notify Notify `yaml:"notify"`
 
 	// dir is where the file was read from; relative prompt paths resolve
 	// against it.
@@ -66,6 +68,32 @@ type GitHubApp struct {
 	PrivateKeyFile string `yaml:"private_key_file"`
 	// Slug is the app's URL name, used for the bot commit identity.
 	Slug string `yaml:"slug"`
+}
+
+// Notify configures notification channels. Any subset may be set.
+type Notify struct {
+	Ntfy     Ntfy     `yaml:"ntfy"`
+	Telegram Telegram `yaml:"telegram"`
+	// Webhook receives every event as a JSON POST.
+	Webhook string `yaml:"webhook"`
+	// Events lists the kinds to send: proposed, merged, needs-human, failed,
+	// reverted, digest. Empty means all but merged.
+	Events []string `yaml:"events"`
+	// Digest is the local time of day for the daily summary, "HH:MM".
+	// Empty means 08:00.
+	Digest string `yaml:"digest"`
+}
+
+// Ntfy is an ntfy.sh topic, self-hosted or not.
+type Ntfy struct {
+	URL   string `yaml:"url"`
+	Token string `yaml:"token"`
+}
+
+// Telegram is a bot and the chat it posts to.
+type Telegram struct {
+	BotToken string `yaml:"bot_token"`
+	ChatID   string `yaml:"chat_id"`
 }
 
 // Set reports whether an app is configured at all.
