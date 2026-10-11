@@ -34,6 +34,7 @@ const (
 	modalAutonomy
 	modalPick
 	modalHelp
+	modalTask
 )
 
 // refreshEvery is how often the interface re-reads its source. The daemon
@@ -79,6 +80,10 @@ type Model struct {
 	pickRepo config.Repo
 	pickIdx  int
 
+	// task modal
+	taskInput textinput.Model
+	taskRepo  int // index into fleet repos, -1 for none
+
 	// preview is the selected run's log under the list.
 	preview struct {
 		id     string
@@ -104,6 +109,12 @@ func New(src Source, fleet *config.Fleet, version string) Model {
 	m.filter.Prompt = "/ "
 	m.filter.Placeholder = "filter by repo, job, status, run id"
 	m.filter.PromptStyle = sKey
+	m.taskInput = textinput.New()
+	m.taskInput.Prompt = "> "
+	m.taskInput.Placeholder = "what should MARSHAL do?"
+	m.taskInput.PromptStyle = sKey
+	m.taskInput.CharLimit = 2000
+	m.taskRepo = -1
 	m.spin = spinner.New(spinner.WithSpinner(spinner.MiniDot), spinner.WithStyle(sGood))
 	m.view = viewport.New(80, 20)
 	return m
@@ -349,7 +360,11 @@ func (m *Model) fillLists() {
 		if r.Parent != "" {
 			job = sDim.Render("↳ ") + job
 		}
-		rows = append(rows, []string{r.ID, sDim.Render(ago(r.StartedAt)), r.Repo, job, st,
+		repoName := r.Repo
+		if repoName == "" {
+			repoName = sDim.Render("(no repo)")
+		}
+		rows = append(rows, []string{r.ID, sDim.Render(ago(r.StartedAt)), repoName, job, st,
 			fmt.Sprint(r.Turns), fmt.Sprintf("%.2f", r.CostUSD), sDim.Render(shortPR(r.PRURL))})
 	}
 	m.runList.setRows(rows)
@@ -385,6 +400,8 @@ func statusCell(s store.Status, spin string) string {
 		return sGood.Render("● committed")
 	case store.Pushed:
 		return sGood.Render("● pushed")
+	case store.Reported:
+		return sGood.Render("● reported")
 	case store.NoChange:
 		return sDim.Render("○ no change")
 	case store.Failed:
@@ -449,6 +466,15 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "n":
 		return m.openPick(m.repoCursor)
+	case "t":
+		m.modal = modalTask
+		m.taskInput.Reset()
+		m.taskRepo = -1
+		if m.screen == dashboard && len(m.fleet.Repos) > 0 {
+			m.taskRepo = m.repoCursor
+		}
+		m.taskInput.Width = max(m.width-12, 20)
+		return m, m.taskInput.Focus()
 	}
 	switch m.screen {
 	case dashboard:
@@ -638,6 +664,44 @@ func (m Model) keyModal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case modalHelp:
 		m.modal = none
 		return m, nil
+	case modalTask:
+		switch s {
+		case "esc":
+			m.modal = none
+			m.taskInput.Blur()
+			return m, nil
+		case "ctrl+r":
+			// Cycle the target: none, then each repo.
+			m.taskRepo++
+			if m.taskRepo >= len(m.fleet.Repos) {
+				m.taskRepo = -1
+			}
+			return m, nil
+		case "enter":
+			prompt := strings.TrimSpace(m.taskInput.Value())
+			if prompt == "" {
+				return m, nil
+			}
+			repo := ""
+			if m.taskRepo >= 0 {
+				repo = m.fleet.Repos[m.taskRepo].Name
+			}
+			src := m.src
+			m.modal = none
+			m.taskInput.Blur()
+			m.screen = runs
+			m.layout()
+			return m, func() tea.Msg {
+				id, err := src.Task(context.Background(), prompt, repo)
+				if err != nil {
+					return actionDone{err: err}
+				}
+				return actionDone{msg: fmt.Sprintf("task started as run %s", id)}
+			}
+		}
+		var cmd tea.Cmd
+		m.taskInput, cmd = m.taskInput.Update(k)
+		return m, cmd
 	case modalAutonomy:
 		m.modal = none
 		if s == "y" || s == "Y" || s == "enter" {

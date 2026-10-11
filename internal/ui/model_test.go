@@ -228,6 +228,30 @@ func TestAutonomyModal(t *testing.T) {
 	}
 }
 
+func TestTaskModal(t *testing.T) {
+	m := loaded(t)
+	m, _ = step(m, key("t"))
+	if m.modal != modalTask || m.taskRepo != 0 {
+		t.Fatalf("modal=%v repo=%d", m.modal, m.taskRepo)
+	}
+	for _, r := range "do x" {
+		m, _ = step(m, key(string(r)))
+	}
+	m, _ = step(m, tea.KeyMsg{Type: tea.KeyCtrlR})
+	m, _ = step(m, tea.KeyMsg{Type: tea.KeyCtrlR})
+	if m.taskRepo != -1 || !strings.Contains(m.View(), "no repository") {
+		t.Errorf("ctrl+r should cycle to no repo: %d", m.taskRepo)
+	}
+	m, cmd := step(m, key("enter"))
+	if cmd == nil || m.modal != none {
+		t.Fatal("enter should submit and close")
+	}
+	m, _ = step(m, cmd())
+	if !strings.Contains(m.footer(), "needs the daemon") {
+		t.Errorf("footer = %q", m.footer())
+	}
+}
+
 func TestHelpAndQuit(t *testing.T) {
 	m := loaded(t)
 	m, _ = step(m, key("?"))

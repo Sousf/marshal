@@ -69,8 +69,27 @@ Working today:
   daily digest at a configured time. `marshal notify test` proves the
   channel; `marshal digest` prints the summary.
 
+- Skills. A reviewed library of procedures under `skills/` in this repo.
+  Every run gets the relevant ones in its brief, chosen by matching the job
+  and repo against each skill, and the whole library mounted read-only. A
+  run may end its report with `## Skill: <name>` to propose a new or
+  corrected procedure; that becomes a PR in the `memory` class, which never
+  merges on its own. Content that pipes downloads to a shell, handles
+  credentials or weakens a check is refused before a PR is opened, and the
+  verifier checks the rest.
+- The operator profile. `skills/OPERATOR.md` is what MARSHAL knows about
+  how you want things done. A daily `reflect` job reads the week's reviewer
+  feedback, rejections and reverts and proposes edits with the evidence
+  cited, again as a reviewed PR. Every brief carries the profile.
+- Tasks. `marshal task "<instruction>"`, the `t` key in the interface, or a
+  `tasks:` entry in the fleet file. With `--repo` it is a job whose result
+  is a PR; without, the agent works in an empty scratch directory with
+  read, search, web and write-to-scratch tools, no tokens, and leaves a
+  report under `~/.local/share/marshal/reports` with a notification.
+
 Not yet: adapters for agents other than Claude Code, a review screen in the
-interface, a posture score per repository.
+interface, a posture score per repository, a chat channel for dispatching
+tasks from a phone.
 
 ## Run it yourself
 

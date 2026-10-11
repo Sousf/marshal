@@ -62,6 +62,9 @@ func TestParseStreamStructured(t *testing.T) {
 	if string(res.Structured) != `{"verdict":"PASS","reason":"ok"}` {
 		t.Errorf("structured = %s", res.Structured)
 	}
+	if a := strings.Join(Claude{}.Args(Request{ExtraDirs: []string{"/m/skills"}}), " "); !strings.Contains(a, "--add-dir /m/skills") {
+		t.Errorf("extra dirs missing: %s", a)
+	}
 	args := Claude{}.Args(Request{JSONSchema: `{"type":"object"}`})
 	if !strings.Contains(strings.Join(args, " "), `--json-schema {"type":"object"}`) {
 		t.Errorf("schema flag missing: %v", args)

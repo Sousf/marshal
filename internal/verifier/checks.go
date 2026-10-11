@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/Sousf/marshal/internal/skills"
 )
 
 // Finding is one thing the verifier, or the deterministic checks, noticed.
@@ -129,6 +131,15 @@ func scanPatch(patch string) (uses, suspicious, memory []string) {
 		if file == "AGENTS.md" || strings.HasSuffix(file, "/AGENTS.md") {
 			if memoryRE.MatchString(line[1:]) {
 				memory = append(memory, clip(strings.TrimSpace(line[1:]), 120))
+			}
+			continue
+		}
+		// Skills and the operator profile are instructions by nature, so
+		// the instruction-shape test does not apply; the forbidden-content
+		// test does, and a hit is just as fatal.
+		if strings.HasPrefix(file, "skills/") || strings.Contains(file, "/skills/") {
+			if r := skills.Check(skills.Skill{Name: "x", Description: "x", Body: line[1:]}); len(r) > 0 {
+				memory = append(memory, file+": "+r[0])
 			}
 			continue
 		}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Sousf/marshal/internal/config"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/notify"
 	"github.com/Sousf/marshal/internal/store"
@@ -208,5 +209,55 @@ func TestNotificationsAndDigest(t *testing.T) {
 	text, _ := d.DigestText(ctx)
 	if !strings.Contains(text, "1 run(s)") || !strings.Contains(text, "1 merged") || !strings.Contains(text, "Nothing is waiting") || !strings.Contains(text, "Autonomy on") {
 		t.Errorf("digest:\n%s", text)
+	}
+}
+
+func TestTasksTriggerAndSchedule(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{}}
+	d, a, _ := newDaemonDir(t, gh)
+	t.Setenv("MARSHAL_STATE", t.TempDir())
+	id, err := d.TriggerTask(ctx, "", "write a haiku about CI", "", "")
+	if err != nil || len(id) != 8 {
+		t.Fatal(err)
+	}
+	wait(t, d)
+	r, _ := d.Store.GetRun(ctx, id)
+	if r.Status != store.Reported || r.Job != "task" || r.Repo != "" {
+		t.Errorf("%+v", r)
+	}
+	if _, err := d.TriggerTask(ctx, "", "", "", ""); err == nil {
+		t.Error("empty prompt must fail")
+	}
+	if _, err := d.TriggerTask(ctx, "", "x", "nope", ""); err == nil {
+		t.Error("unknown repo must fail")
+	}
+	// A repo task becomes a PR-style run and respects the busy rule.
+	id2, err := d.TriggerTask(ctx, "", "tidy go.mod", "x", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.TriggerTask(ctx, "", "again", "x", ""); err == nil {
+		t.Error("repo busy")
+	}
+	wait(t, d)
+	r2, _ := d.Store.GetRun(ctx, id2)
+	if r2.Repo != "x" || r2.Class != "code" || r2.Status != store.NoChange {
+		t.Errorf("%+v", r2)
+	}
+	// Scheduled tasks fire once per interval.
+	d.Fleet.Tasks = []config.Task{{Name: "weekly", Schedule: "weekly", Prompt: "report drift"}}
+	before := a.calls
+	d.scheduleTasks(ctx)
+	wait(t, d)
+	d.scheduleTasks(ctx)
+	wait(t, d)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.calls != before+1 {
+		t.Errorf("scheduled task should run once, ran %d", a.calls-before)
+	}
+	if last, _ := d.Store.LastStarted(ctx, "task:weekly", ""); last.IsZero() {
+		t.Error("scheduled task recorded under task:<name>")
 	}
 }

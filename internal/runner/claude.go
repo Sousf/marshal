@@ -79,6 +79,10 @@ func (c Claude) Args(req Request) []string {
 	if req.JSONSchema != "" {
 		args = append(args, "--json-schema", req.JSONSchema)
 	}
+	if len(req.ExtraDirs) > 0 {
+		args = append(args, "--add-dir")
+		args = append(args, req.ExtraDirs...)
+	}
 	return args
 }
 

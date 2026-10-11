@@ -25,6 +25,7 @@ type Source interface {
 	Verdict(ctx context.Context, runID string) (store.Verdict, bool, error)
 	Trigger(ctx context.Context, job, repo string) (string, error)
 	Fix(ctx context.Context, runID string) (string, error)
+	Task(ctx context.Context, prompt, repo string) (string, error)
 	SetAutonomy(ctx context.Context, on bool) error
 }
 
@@ -88,6 +89,11 @@ func (d Daemon) Fix(ctx context.Context, runID string) (string, error) {
 	return r.ID, err
 }
 
+func (d Daemon) Task(ctx context.Context, prompt, repo string) (string, error) {
+	r, err := d.do(ctx, api.Request{Op: "task", Value: prompt, Repo: repo})
+	return r.ID, err
+}
+
 func (d Daemon) SetAutonomy(ctx context.Context, on bool) error {
 	v := "off"
 	if on {
@@ -142,6 +148,10 @@ func (l Local) Trigger(context.Context, string, string) (string, error) {
 }
 
 func (l Local) Fix(context.Context, string) (string, error) {
+	return "", ErrNoDaemon
+}
+
+func (l Local) Task(context.Context, string, string) (string, error) {
 	return "", ErrNoDaemon
 }
 

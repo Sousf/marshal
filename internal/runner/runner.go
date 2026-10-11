@@ -61,6 +61,9 @@ type Request struct {
 	// JSONSchema, when set, asks the harness for a structured final answer
 	// matching the schema. The parsed object lands in Result.Structured.
 	JSONSchema string
+	// ExtraDirs are directories outside Dir the agent may read, such as the
+	// mounted skills library.
+	ExtraDirs []string
 }
 
 // Result summarises a finished run.

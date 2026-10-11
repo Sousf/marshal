@@ -54,6 +54,18 @@ func TestParseAndResolve(t *testing.T) {
 	}
 }
 
+func TestMemoryRepo(t *testing.T) {
+	f, _ := Parse([]byte(good))
+	if _, _, ok := f.MemoryRepo(); ok {
+		t.Error("no memory by default")
+	}
+	f.Memory.Repo = "a"
+	r, dir, ok := f.MemoryRepo()
+	if !ok || r.Name != "a" || dir != "skills" {
+		t.Errorf("%+v %q %v", r, dir, ok)
+	}
+}
+
 func TestResolveVerifier(t *testing.T) {
 	f, _ := Parse([]byte(good))
 	v := f.ResolveVerifier()
@@ -104,6 +116,9 @@ func TestValidation(t *testing.T) {
 		"missing url":     strings.Replace(good, "url: u, ", "", 1),
 		"bad class start": strings.Replace(good, "start: review", "start: maybe", 1),
 		"partial app":     good + "\ngithub_app: {app_id: 1}\n",
+		"bad memory repo": good + "\nmemory: {repo: nope}\n",
+		"task no prompt":  good + "\ntasks: [{name: t}]\n",
+		"task bad repo":   good + "\ntasks: [{name: t, prompt: p, repo: nope}]\n",
 	}
 	for name, src := range cases {
 		if _, err := Parse([]byte(src)); err == nil {

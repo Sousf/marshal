@@ -237,12 +237,14 @@ func (m Model) footer() string {
 		keys = [][2]string{{"h/l", "repo"}, {"j/k", "job"}, {"enter", "start"}, {"esc", "cancel"}}
 	case m.modal == modalAutonomy:
 		keys = [][2]string{{"y", "yes"}, {"n", "no"}}
+	case m.modal == modalTask:
+		keys = [][2]string{{"type", "the instruction"}, {"ctrl+r", "target"}, {"enter", "start"}, {"esc", "cancel"}}
 	case m.modal == modalHelp:
 		keys = [][2]string{{"any key", "close"}}
 	case m.filtering:
 		keys = [][2]string{{"type", "filter"}, {"enter", "keep"}, {"esc", "clear"}}
 	case m.screen == dashboard:
-		keys = [][2]string{{"j/k", "repo"}, {"enter", "start job"}, {"o", "its runs"}, {"a", "autonomy"}, {"?", "help"}, {"q", "quit"}}
+		keys = [][2]string{{"j/k", "repo"}, {"enter", "start job"}, {"t", "task"}, {"o", "its runs"}, {"a", "autonomy"}, {"?", "help"}, {"q", "quit"}}
 	case m.screen == runs:
 		keys = [][2]string{{"j/k", "select"}, {"enter", "full log"}, {"/", "filter"}, {"o", "open PR"}, {"x", "fix PR now"}, {"n", "new run"}, {"?", "help"}}
 	case m.screen == trust:
@@ -465,6 +467,17 @@ func (m Model) renderModal() string {
 		content = strings.TrimRight(b.String(), "\n")
 	case modalHelp:
 		content = m.helpText()
+	case modalTask:
+		target := sDim.Render("no repository → a report")
+		if m.taskRepo >= 0 {
+			target = sTabOn.Render(m.fleet.Repos[m.taskRepo].Name) + sDim.Render(" → a pull request")
+		}
+		content = sTitle.Render("Run a task") + "\n\n" + m.taskInput.View() + "\n\n" +
+			sDim.Render("target  ") + target + sFaint.Render("   ctrl+r to change") + "\n\n" +
+			sKey.Render("enter") + sDim.Render(" start    ") + sKey.Render("esc") + sDim.Render(" cancel")
+		if m.status.Version == "(no daemon)" {
+			content += "\n\n" + sWarn.Render("No daemon is running. Start one with `marshal serve`.")
+		}
 	}
 	box := sModal.Render(content)
 	return lipgloss.Place(m.width, m.bodyHeight(), lipgloss.Center, lipgloss.Center, box)
@@ -476,7 +489,7 @@ func (m Model) helpText() string {
 		title string
 		keys  [][2]string
 	}{
-		{"everywhere", [][2]string{{"1 2 3", "dashboard, runs, trust"}, {"tab / S-tab", "next, previous screen"}, {"n", "start a job"}, {"a", "autonomy on/off (asks first)"}, {"R", "refresh now"}, {"?", "this help"}, {"q / ctrl-c", "quit, or back from a run"}}},
+		{"everywhere", [][2]string{{"1 2 3", "dashboard, runs, trust"}, {"tab / S-tab", "next, previous screen"}, {"n", "start a job"}, {"t", "run a free-form task, with or without a repo"}, {"a", "autonomy on/off (asks first)"}, {"R", "refresh now"}, {"?", "this help"}, {"q / ctrl-c", "quit, or back from a run"}}},
 		{"dashboard", [][2]string{{"j k h l", "select repo"}, {"enter", "start a job on it"}, {"o", "show its runs"}}},
 		{"runs", [][2]string{{"j k g G", "move, top, bottom"}, {"pgup pgdn", "page"}, {"enter", "open the run"}, {"/", "filter · esc clears · backspace clears a kept filter"}, {"o", "open its PR in the browser"}, {"x", "push a fix to its PR now, outside the attempt cap"}}},
 		{"run", [][2]string{{"j k", "scroll"}, {"f", "follow the live stream"}, {"g G", "top, bottom"}, {"o", "open its PR"}, {"esc", "back to runs"}}},

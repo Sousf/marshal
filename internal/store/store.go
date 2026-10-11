@@ -29,6 +29,7 @@ const (
 	NoChange  Status = "no-change" // agent finished, nothing to propose
 	Committed Status = "committed" // committed on a local branch, no PR asked for
 	Pushed    Status = "pushed"    // follow-up pushed to an existing PR
+	Reported  Status = "reported"  // a task without a repo produced a report
 	Proposed  Status = "proposed"  // PR opened, awaiting review or soak
 	Merged    Status = "merged"
 	Reverted  Status = "reverted" // merged by MARSHAL, then reverted by MARSHAL
@@ -361,6 +362,27 @@ func (s *Store) ListByStatus(ctx context.Context, statuses ...Status) ([]Run, er
 	}
 	q += `) ORDER BY started_at`
 	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// FeedbackSince returns finished runs after t that carry reviewer feedback
+// or ended rejected, newest first, for the reflection job.
+func (s *Store) FeedbackSince(ctx context.Context, since time.Time, limit int) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+runCols+` FROM runs
+		WHERE started_at>=? AND (feedback<>'' OR status IN (?,?)) ORDER BY started_at DESC LIMIT ?`,
+		since.Unix(), Rejected, Reverted, limit)
 	if err != nil {
 		return nil, err
 	}

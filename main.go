@@ -61,6 +61,7 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
       --keep                        leave the work tree on disk
   marshal trigger <job> <repo>    ask the daemon to run a job in the background
   marshal fix <run-id>            ask the daemon to push a fix to that proposal's PR now, outside the cap
+  marshal task "<instruction>"    run a free-form task via the daemon; --repo <name> ends in a PR, without it a report
   marshal verify <run-id>         run the verifier on a proposal here, in the foreground
       --comment                     also post the verdict on the PR
   marshal runs [repo]             recent runs
@@ -158,6 +159,32 @@ func app(args []string) error {
 		return cmdStatus(ctx)
 	case "trigger":
 		return cmdTrigger(ctx, rest)
+	case "task":
+		prompt, repoName := "", ""
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case "--repo":
+				if i+1 >= len(rest) {
+					return errors.New("--repo needs a value")
+				}
+				repoName = rest[i+1]
+				i++
+			default:
+				if prompt != "" {
+					prompt += " "
+				}
+				prompt += rest[i]
+			}
+		}
+		if strings.TrimSpace(prompt) == "" {
+			return errors.New(`usage: marshal task "<instruction>" [--repo <name>]`)
+		}
+		resp, err := client().Do(ctx, api.Request{Op: "task", Value: prompt, Repo: repoName})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("task run %s started; `marshal show %s` to follow\n", resp.ID, resp.ID)
+		return nil
 	case "fix":
 		if len(rest) != 1 {
 			return errors.New("usage: marshal fix <run-id>")
@@ -871,6 +898,9 @@ func cmdShow(ctx context.Context, args []string) error {
 	}
 	if r.Summary != "" {
 		fmt.Printf("\n--- report ---\n%s\n", r.Summary)
+	}
+	if r.Status == store.Reported {
+		fmt.Printf("\nsaved: %s\n", filepath.Join(config.StateDir(), "reports", r.ID+".md"))
 	}
 	return nil
 }

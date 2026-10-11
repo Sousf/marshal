@@ -191,6 +191,9 @@ func (d *Daemon) tick(ctx context.Context) {
 	if err := d.schedule(ctx); err != nil {
 		d.fail("schedule: %v", err)
 	}
+	if err := d.scheduleTasks(ctx); err != nil {
+		d.fail("tasks: %v", err)
+	}
 }
 
 func (d *Daemon) fail(format string, args ...any) {
@@ -1050,6 +1053,100 @@ func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) 
 	return id, nil
 }
 
+// TriggerTask starts a free-form task in the background. With a repo it is
+// subject to the repo's one-run-at-a-time rule; without one it runs beside
+// anything else.
+func (d *Daemon) TriggerTask(ctx context.Context, name, prompt, repoName, class string) (string, error) {
+	d.init()
+	if strings.TrimSpace(prompt) == "" {
+		return "", fmt.Errorf("task: empty prompt")
+	}
+	if name == "" {
+		name = "task"
+	}
+	var repo *config.Repo
+	key := ""
+	if repoName != "" {
+		r, ok := d.Fleet.Repo(repoName)
+		if !ok {
+			return "", fmt.Errorf("unknown repo %q", repoName)
+		}
+		repo = &r
+		key = r.Name
+	}
+	d.mu.Lock()
+	id := store.NewID()
+	if key == "" {
+		key = "task:" + id
+	}
+	if busy, ok := d.running[key]; ok {
+		d.mu.Unlock()
+		return "", fmt.Errorf("%s is busy with run %s", key, busy)
+	}
+	d.running[key] = id
+	d.mu.Unlock()
+	where := "without a repository"
+	if repo != nil {
+		where = "on " + repo.Name
+	}
+	d.Log.Printf("run %s: starting task %q %s", id, firstLine(prompt), where)
+	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			delete(d.running, key)
+			d.mu.Unlock()
+		}()
+		rec, err := x.Task(d.base, name, prompt, repo, class, run.Options{ID: id})
+		if err != nil {
+			d.fail("run %s: %v", id, err)
+			return
+		}
+		d.Log.Printf("run %s: %s %s", id, rec.Status, rec.PRURL)
+		switch rec.Status {
+		case store.Reported:
+			d.send(d.base, notify.Event{Kind: notify.Proposed, Title: "task report ready: " + firstLine(prompt), Body: firstLine(rec.Summary)})
+		case store.Proposed:
+			d.send(d.base, notify.Event{Kind: notify.Proposed, Title: repo.Name + ": PR opened by task", Body: firstLine(rec.Summary), URL: rec.PRURL})
+		case store.Failed, store.Blocked:
+			d.send(d.base, notify.Event{Kind: notify.Failed, Title: "task " + string(rec.Status) + ": " + firstLine(prompt), Body: firstLine(rec.Error)})
+		}
+	}()
+	return id, nil
+}
+
+// scheduleTasks starts scheduled tasks that are due, one per tick.
+func (d *Daemon) scheduleTasks(ctx context.Context) error {
+	now := d.now()
+	for _, t := range d.Fleet.Tasks {
+		s, err := sched.Parse(t.Schedule)
+		if err != nil {
+			d.fail("task %s: %v", t.Name, err)
+			continue
+		}
+		if s.Manual() || s.OnFailure {
+			continue
+		}
+		jobName := "task:" + t.Name
+		last, err := d.Store.LastStarted(ctx, jobName, t.Repo)
+		if err != nil {
+			return err
+		}
+		if !s.Due(last, now) {
+			continue
+		}
+		if t.Repo != "" && d.busy(t.Repo) {
+			continue
+		}
+		if _, err := d.TriggerTask(ctx, jobName, t.Prompt, t.Repo, t.Class); err != nil {
+			d.fail("task %s: %v", t.Name, err)
+			continue
+		}
+		return nil
+	}
+	return nil
+}
+
 // Handle implements api.Handler.
 func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 	d.init()
@@ -1092,6 +1189,12 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 		return api.Response{Run: &r, Events: ev}
 	case "trigger":
 		id, err := d.Trigger(ctx, req.Job, req.Repo)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{ID: id}
+	case "task":
+		id, err := d.TriggerTask(ctx, req.Job, req.Value, req.Repo, "")
 		if err != nil {
 			return api.Fail("%v", err)
 		}

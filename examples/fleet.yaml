@@ -54,7 +54,7 @@ defaults:
 repos:
   - name: marshal
     url: git@github.com:Sousf/marshal.git
-    jobs: [onboard, posture-audit, vuln-fix, ci-fix]
+    jobs: [onboard, posture-audit, vuln-fix, ci-fix, reflect]
   - name: spotify-tui
     url: git@github.com:Sousf/spotify-tui.git
     jobs: [onboard, posture-audit, vuln-fix, ci-fix]
@@ -87,6 +87,11 @@ jobs:
     schedule: on-failure
     class: code
     max_usd: 5.00
+  - name: reflect
+    description: update the operator profile and skills from the week's reviewer feedback
+    schedule: daily
+    class: memory
+    max_turns: 30
 
 policy:
   classes:
@@ -94,6 +99,9 @@ policy:
     dependency: {start: review, promote: 3, demote_on_reject: 1, demote_on_revert: 2, soak_hours: 24}
     code:       {start: review, promote: 5, demote_on_reject: 1, demote_on_revert: 2, soak_hours: 48}
     release:    {start: locked}
+    # Memory: skills and the operator profile. promote 0 means it never
+    # merges on its own, however many you approve.
+    memory:     {start: review, promote: 0}
   caps:
     prs_per_repo_per_day: 3
     auto_merges_per_repo_per_day: 2
@@ -107,6 +115,19 @@ policy:
     max_turns: 25
     max_usd: 2.00
     always: false
+
+# The skills library and operator profile live in this fleet repo under
+# skills/. Every run reads them; proposals arrive as PRs to that repo.
+memory:
+  repo: marshal
+  dir: skills
+
+# Scheduled free-form tasks. With repo: a PR; without: a report under
+# ~/.local/share/marshal/reports, and a notification.
+# tasks:
+#   - name: weekly-deps
+#     schedule: weekly
+#     prompt: Compare the dependency versions across every repo in the fleet and report drift.
 
 # Where to hear about events. Any subset; events defaults to everything but
 # merged; digest is a local time of day.

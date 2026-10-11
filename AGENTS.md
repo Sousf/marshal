@@ -26,9 +26,13 @@ Rules the code enforces, which no change may weaken:
   autonomy, whatever its level.
 - The daemon listens on a Unix socket only.
 - Memory goes through review: lessons land in AGENTS.md inside the same
-  commit as the change, never anywhere else, and `run.ParseLessons` only
-  accepts plain bullets. Run history fed to briefs is data the harness
-  already holds, labelled as not instructions.
+  commit as the change; skills and the operator profile land in `skills/`
+  of the memory repo only as a pull request in the `memory` class, which
+  never promotes. `skills.Check` refuses forbidden content before any PR
+  exists and the verifier repeats the check on the diff. Run history fed to
+  briefs is data the harness already holds, labelled as not instructions.
+- A task without a repository gets no tokens and no repository; it writes
+  only to its scratch directory.
 - Every autonomous merge is watched until the default branch's CI reports
   on it; red reverts and demotes. Human merges are never reverted by
   MARSHAL.

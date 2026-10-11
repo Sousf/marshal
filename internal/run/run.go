@@ -18,6 +18,7 @@ import (
 	"github.com/Sousf/marshal/internal/jobs"
 	"github.com/Sousf/marshal/internal/policy"
 	"github.com/Sousf/marshal/internal/runner"
+	"github.com/Sousf/marshal/internal/skills"
 	"github.com/Sousf/marshal/internal/store"
 	"github.com/Sousf/marshal/internal/workspace"
 )
@@ -67,6 +68,34 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	if !ok {
 		return store.Run{}, fmt.Errorf("unknown repo %q", repoName)
 	}
+	return x.executeJob(ctx, job, repo, opts)
+}
+
+// Task runs a free-form instruction. With a repo it is a job whose brief is
+// the instruction and whose result is a pull request. Without one it runs
+// in an empty scratch directory with read, search, web and write-to-scratch
+// tools, no tokens, and its result is a report.
+func (x *Executor) Task(ctx context.Context, name, prompt string, repo *config.Repo, class string, opts Options) (store.Run, error) {
+	if strings.TrimSpace(prompt) == "" {
+		return store.Run{}, fmt.Errorf("task: empty prompt")
+	}
+	if name == "" {
+		name = "task"
+	}
+	if repo != nil {
+		if class == "" {
+			class = "code"
+		}
+		if _, ok := x.Fleet.Policy.Classes[class]; !ok {
+			return store.Run{}, fmt.Errorf("task: class %q is not in policy.classes", class)
+		}
+		job := config.Job{Name: name, Class: class, Prompt: prompt, Description: firstLine(prompt)}
+		return x.executeJob(ctx, job, *repo, opts)
+	}
+	return x.report(ctx, name, prompt, opts)
+}
+
+func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.Repo, opts Options) (store.Run, error) {
 	res := x.Fleet.Resolve(job)
 	brief, err := x.Fleet.PromptText(job, jobs.Prompt)
 	if err != nil {
@@ -133,8 +162,16 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	if h := History(ctx, x.Store, repo.Name, job.Name); h != "" {
 		prompt += "\n" + h
 	}
+	if job.Class == "memory" {
+		prompt += "\n" + fleetFeedback(ctx, x.Store, time.Now().Add(-7*24*time.Hour))
+	}
+	mem := x.openMemory(ctx, rec.ID, identity, harnessEnv, logf)
+	defer mem.close()
+	if m := mem.brief(job.Name + " " + job.Description + " " + repo.Name + " " + brief); m != "" {
+		prompt += "\n" + m
+	}
 	req := runner.Request{
-		Prompt:          prompt + jobs.Contract,
+		Prompt:          prompt + jobs.Contract + skills.Contract,
 		SystemPrompt:    systemPrompt(repo, ws.Conventions()),
 		Dir:             ws.Dir,
 		Model:           res.Model,
@@ -145,6 +182,7 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 		AllowedTools:    res.AllowedTools,
 		DisallowedTools: res.DisallowedTools,
 		Env:             agentEnv,
+		ExtraDirs:       mem.extraDirs(),
 	}
 	result, runErr := x.Adapter.Run(ctx, req, func(e runner.Event) {
 		logf(string(e.Kind), "%s", e.Text)
@@ -161,9 +199,9 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	if result.IsError {
 		return finish(store.Failed, "agent: "+firstLine(result.Output))
 	}
-	if n := x.recordLessons(ws, result.Output, logf); n > 0 {
-		rec.Summary, _ = ParseLessons(result.Output)
-		rec.Summary = result.Output // keep the lessons visible in the report
+	x.recordLessons(ws, result.Output, logf)
+	if _, props := skills.ParseProposals(result.Output, repo.Name+"/"+rec.ID); len(props) > 0 {
+		mem.propose(ctx, x, rec, props, opts.NoPR, logf)
 	}
 
 	changed, err := ws.Changed(ctx)
@@ -289,6 +327,11 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	var b strings.Builder
 	b.WriteString(brief)
 	fmt.Fprintf(&b, "\n## The pull request\n\n%s\n\nOriginal job `%s`: %s\n\nTitle: %s\n\n<pr-body>\n%s\n</pr-body>\n", parent.PRURL, job.Name, job.Description, pr.Title, strings.TrimSpace(pr.Body))
+	mem := x.openMemory(ctx, rec.ID, identity, harnessEnv, logf)
+	defer mem.close()
+	if m := mem.brief(kind + " " + job.Name + " " + job.Description + " " + repo.Name + " " + firstLine(logs)); m != "" {
+		b.WriteString("\n" + m)
+	}
 	switch kind {
 	case "address-review":
 		b.WriteString("\n## The reviewer's comments\n\n" + strings.TrimSpace(logs) + "\n")
@@ -313,6 +356,7 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 		AllowedTools:    res.AllowedTools,
 		DisallowedTools: res.DisallowedTools,
 		Env:             agentEnv,
+		ExtraDirs:       mem.extraDirs(),
 	}
 	result, runErr := x.Adapter.Run(ctx, req, func(e runner.Event) { logf(string(e.Kind), "%s", e.Text) })
 	rec.Turns = result.Turns
@@ -328,6 +372,9 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 		return finish(store.Failed, "agent: "+firstLine(result.Output))
 	}
 	x.recordLessons(ws, result.Output, logf)
+	if _, props := skills.ParseProposals(result.Output, repo.Name+"/"+rec.ID); len(props) > 0 {
+		mem.propose(ctx, x, rec, props, opts.NoPR, logf)
+	}
 	changed, err := ws.Changed(ctx)
 	if err != nil {
 		return finish(store.Failed, err.Error())
@@ -396,6 +443,104 @@ func short(sha string) string {
 		return sha[:8]
 	}
 	return sha
+}
+
+// report runs a task that has no repository: a scratch directory, the
+// default tool set plus writing into that directory, and REPORT.md (or the
+// final message) as the deliverable, saved under the state directory.
+func (x *Executor) report(ctx context.Context, name, prompt string, opts Options) (store.Run, error) {
+	res := x.Fleet.Resolve(config.Job{Name: name, Class: "code"})
+	if !x.Adapter.Available() {
+		return store.Run{}, fmt.Errorf("adapter %s is not available on this host", x.Adapter.Name())
+	}
+	rec := &store.Run{ID: opts.ID, Job: name, Repo: "", Class: "report", Adapter: x.Adapter.Name(), Model: res.Model}
+	if err := x.Store.CreateRun(ctx, rec); err != nil {
+		return store.Run{}, err
+	}
+	logf := x.logger(ctx, rec.ID, opts.Log)
+	finish := func(st store.Status, errText string) (store.Run, error) {
+		rec.Status = st
+		rec.Error = errText
+		rec.FinishedAt = time.Now()
+		if err := x.Store.UpdateRun(ctx, rec); err != nil {
+			return *rec, err
+		}
+		return *rec, nil
+	}
+	dir, err := os.MkdirTemp(x.workRoot(), "task-"+rec.ID+"-")
+	if err != nil {
+		return finish(store.Failed, err.Error())
+	}
+	if !opts.Keep {
+		defer os.RemoveAll(dir)
+	}
+	logf("note", "run %s: task in scratch directory (%s, %s)", rec.ID, res.Model, res.Effort)
+	mem := x.openMemory(ctx, rec.ID, res.Identity, nil, logf)
+	defer mem.close()
+
+	var b strings.Builder
+	b.WriteString("# Task\n\n" + strings.TrimSpace(prompt) + "\n")
+	if m := mem.brief(prompt); m != "" {
+		b.WriteString("\n" + m)
+	}
+	b.WriteString(`
+## How MARSHAL runs you
+
+- You are in an empty scratch directory with no repository. You may read anything on the web with
+  the tools you have, and write files only here. There are no credentials in your environment and
+  you must not look for any.
+- Write your deliverable to REPORT.md in this directory, in Markdown, with a one-line title first.
+  The operator reads it as it is; be specific, cite sources with URLs, and say what you could not
+  establish.
+- Your final message is a short summary of the report, two or three sentences.
+` + skills.Contract)
+	allowed := append([]string{"Write"}, res.AllowedTools...)
+	req := runner.Request{
+		Prompt:          b.String(),
+		SystemPrompt:    "You are MARSHAL running a task for the operator, unattended. Nobody will answer a question; make the conservative call and say so in the report.",
+		Dir:             dir,
+		Model:           res.Model,
+		Effort:          res.Effort,
+		MaxTurns:        res.MaxTurns,
+		MaxUSD:          res.MaxUSD,
+		PermissionMode:  res.PermissionMode,
+		AllowedTools:    allowed,
+		DisallowedTools: res.DisallowedTools,
+		ExtraDirs:       mem.extraDirs(),
+	}
+	result, runErr := x.Adapter.Run(ctx, req, func(e runner.Event) { logf(string(e.Kind), "%s", e.Text) })
+	rec.Turns = result.Turns
+	rec.CostUSD = result.CostUSD
+	rec.Summary = result.Output
+	if ctx.Err() != nil {
+		return finish(store.Cancelled, ctx.Err().Error())
+	}
+	if runErr != nil {
+		return finish(store.Failed, runErr.Error())
+	}
+	if result.IsError {
+		return finish(store.Failed, "agent: "+firstLine(result.Output))
+	}
+	if _, props := skills.ParseProposals(result.Output, "task/"+rec.ID); len(props) > 0 {
+		mem.propose(ctx, x, rec, props, opts.NoPR, logf)
+	}
+	report := result.Output
+	if b, err := os.ReadFile(filepath.Join(dir, "REPORT.md")); err == nil && strings.TrimSpace(string(b)) != "" {
+		report = string(b)
+	}
+	rec.Summary = report
+	reports := filepath.Join(config.StateDir(), "reports")
+	if err := os.MkdirAll(reports, 0o700); err == nil {
+		path := filepath.Join(reports, rec.ID+".md")
+		if err := os.WriteFile(path, []byte(report), 0o600); err == nil {
+			logf("note", "report saved to %s", path)
+		}
+	}
+	return finish(store.Reported, "")
+}
+
+func cloneURL(x *Executor, repo config.Repo) string {
+	return ghapp.CloneURL(repo)
 }
 
 func (x *Executor) workRoot() string {

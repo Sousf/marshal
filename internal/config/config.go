@@ -54,6 +54,11 @@ type Fleet struct {
 	GitHubApp GitHubApp `yaml:"github_app"`
 	// Notify is where the operator hears about events.
 	Notify Notify `yaml:"notify"`
+	// Memory names the repository that holds the skills library and the
+	// operator profile. Empty disables skills.
+	Memory Memory `yaml:"memory"`
+	// Tasks are scheduled free-form instructions, with or without a repo.
+	Tasks []Task `yaml:"tasks"`
 
 	// dir is where the file was read from; relative prompt paths resolve
 	// against it.
@@ -68,6 +73,41 @@ type GitHubApp struct {
 	PrivateKeyFile string `yaml:"private_key_file"`
 	// Slug is the app's URL name, used for the bot commit identity.
 	Slug string `yaml:"slug"`
+}
+
+// Memory points at the skills library: a fleet repo and a directory in it.
+type Memory struct {
+	Repo string `yaml:"repo"`
+	// Dir defaults to "skills".
+	Dir string `yaml:"dir"`
+}
+
+// Task is a free-form instruction. With Repo it ends in a pull request like
+// a job; without, in a report.
+type Task struct {
+	Name     string `yaml:"name"`
+	Schedule string `yaml:"schedule"`
+	Prompt   string `yaml:"prompt"`
+	Repo     string `yaml:"repo"`
+	// Class is the policy class for a repo task's changes. Default "code".
+	Class string `yaml:"class"`
+}
+
+// MemoryRepo resolves the memory repo and directory; ok is false when none
+// is configured.
+func (f *Fleet) MemoryRepo() (Repo, string, bool) {
+	if f.Memory.Repo == "" {
+		return Repo{}, "", false
+	}
+	r, ok := f.Repo(f.Memory.Repo)
+	if !ok {
+		return Repo{}, "", false
+	}
+	dir := f.Memory.Dir
+	if dir == "" {
+		dir = "skills"
+	}
+	return r, dir, true
 }
 
 // Notify configures notification channels. Any subset may be set.
@@ -403,6 +443,30 @@ func (f *Fleet) validate() error {
 	for name, c := range f.Policy.Classes {
 		if !c.Start.Valid() {
 			errs = append(errs, fmt.Errorf("policy.classes.%s: start: unknown level %q", name, c.Start))
+		}
+	}
+	if f.Memory.Repo != "" && !repos[f.Memory.Repo] {
+		errs = append(errs, fmt.Errorf("memory.repo: unknown repo %q", f.Memory.Repo))
+	}
+	tasks := map[string]bool{}
+	for i, t := range f.Tasks {
+		switch {
+		case t.Name == "":
+			errs = append(errs, fmt.Errorf("tasks[%d]: name is required", i))
+		case tasks[t.Name]:
+			errs = append(errs, fmt.Errorf("tasks[%d]: duplicate name %q", i, t.Name))
+		}
+		tasks[t.Name] = true
+		if strings.TrimSpace(t.Prompt) == "" {
+			errs = append(errs, fmt.Errorf("task %q: prompt is required", t.Name))
+		}
+		if t.Repo != "" && !repos[t.Repo] {
+			errs = append(errs, fmt.Errorf("task %q: unknown repo %q", t.Name, t.Repo))
+		}
+		if t.Class != "" {
+			if _, ok := f.Policy.Classes[t.Class]; !ok {
+				errs = append(errs, fmt.Errorf("task %q: class %q is not in policy.classes", t.Name, t.Class))
+			}
 		}
 	}
 	if g := f.GitHubApp; g.Set() && (g.AppID == 0 || g.InstallationID == 0 || g.PrivateKeyFile == "") {
