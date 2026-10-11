@@ -37,6 +37,12 @@ const (
 	modalTask
 )
 
+// ChatCommand, when set, builds the process that c hands the terminal to.
+// main sets it; the interface itself knows nothing about Claude Code.
+var ChatCommand func(ctx context.Context) (*exec.Cmd, error)
+
+type chatDone struct{ err error }
+
 // refreshEvery is how often the interface re-reads its source. The daemon
 // ticks once a minute, so anything faster than a couple of seconds here is
 // polling for its own sake.
@@ -295,6 +301,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.view.GotoTop()
 		}
 		return m, nil
+	case chatDone:
+		if msg.err != nil {
+			m.setFlash("✗ chat: " + msg.err.Error())
+		} else {
+			m.setFlash("✓ back from chat")
+		}
+		return m, m.refresh()
 	case actionDone:
 		if msg.err != nil {
 			m.setFlash("✗ " + msg.err.Error())
@@ -475,6 +488,17 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "n":
 		return m.openPick(m.repoCursor)
+	case "c":
+		if ChatCommand == nil {
+			m.setFlash("chat is not available here")
+			return m, nil
+		}
+		cmd, err := ChatCommand(context.Background())
+		if err != nil {
+			m.setFlash("✗ " + err.Error())
+			return m, nil
+		}
+		return m, tea.ExecProcess(cmd, func(err error) tea.Msg { return chatDone{err: err} })
 	case "t":
 		m.modal = modalTask
 		m.taskInput.Reset()

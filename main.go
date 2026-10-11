@@ -24,6 +24,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/Sousf/marshal/internal/api"
+	"github.com/Sousf/marshal/internal/chat"
 	"github.com/Sousf/marshal/internal/config"
 	"github.com/Sousf/marshal/internal/daemon"
 	"github.com/Sousf/marshal/internal/ghapp"
@@ -43,6 +44,7 @@ var version = "dev"
 const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Learns
 
   marshal                         the interface (same as marshal tui)
+  marshal chat [--new]            talk to MARSHAL: Claude Code with MARSHAL's context and rules (c in the interface)
   marshal serve [--tick 1m]       the daemon: schedules jobs, syncs PRs, merges where trusted
       --detach                      run in the background; log to <state>/serve.log
       --no-schedule                 never start jobs on its own; triggers, sync and merges still work
@@ -155,6 +157,8 @@ func app(args []string) error {
 		return cmdServe(ctx, fleet, rest)
 	case "tui":
 		return cmdTUI(ctx, fleet)
+	case "chat":
+		return cmdChat(ctx, fleet, rest)
 	case "status":
 		return cmdStatus(ctx)
 	case "trigger":
@@ -628,7 +632,66 @@ func cmdTUI(ctx context.Context, f *config.Fleet) error {
 		return err
 	}
 	defer done()
+	ui.ChatCommand = func(ctx context.Context) (*exec.Cmd, error) {
+		st, err := openStore()
+		if err != nil {
+			return nil, err
+		}
+		defer st.Close()
+		return chatCommand(ctx, f, st, false)
+	}
 	return ui.Run(ctx, src, f, version)
+}
+
+// chatCommand gathers what the chat should know and builds the process.
+func chatCommand(ctx context.Context, f *config.Fleet, st *store.Store, fresh bool) (*exec.Cmd, error) {
+	var status *api.Status
+	if resp, err := client().Do(ctx, api.Request{Op: "status"}); err == nil {
+		status = resp.Status
+	}
+	recent, _ := st.ListRuns(ctx, "", 8)
+	return chat.Command(ctx, f, st, status, recent, chat.Options{New: fresh})
+}
+
+func cmdChat(ctx context.Context, f *config.Fleet, args []string) error {
+	fresh := false
+	for _, a := range args {
+		switch a {
+		case "--new":
+			fresh = true
+		default:
+			return fmt.Errorf("unknown flag %q", a)
+		}
+	}
+	if !(runner.Claude{}).Available() {
+		return errors.New("claude is not on PATH")
+	}
+	st, err := openStore()
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	cmd, err := chatCommand(ctx, f, st, fresh)
+	if err != nil {
+		return err
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		// A resume of a conversation Claude Code no longer has fails fast;
+		// start over rather than leave the operator stuck.
+		if !fresh {
+			fmt.Fprintln(os.Stderr, "marshal: could not resume the last conversation; starting a new one")
+			_ = chat.Forget(ctx, st)
+			cmd, err = chatCommand(ctx, f, st, true)
+			if err != nil {
+				return err
+			}
+			cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+			return cmd.Run()
+		}
+		return err
+	}
+	return nil
 }
 
 func cmdStatus(ctx context.Context) error {
