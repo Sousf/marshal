@@ -215,7 +215,7 @@ func (x *Executor) brewSetup(ctx context.Context, repo config.Repo, opts Options
 			}
 		}
 	}
-	rec := &store.Run{Job: BrewSetupJob, Repo: repo.Name, Class: class, Adapter: "marshal", StartedAt: time.Now()}
+	rec := &store.Run{ID: opts.ID, Job: BrewSetupJob, Repo: repo.Name, Class: class, Adapter: "marshal", StartedAt: time.Now()}
 	if err := x.Store.CreateRun(ctx, rec); err != nil {
 		return store.Run{}, err
 	}

@@ -180,3 +180,21 @@ func TestBrewSetupRefusesWhatDoesNotBuild(t *testing.T) {
 		t.Errorf("cgo repo: %s %q", rec.Status, rec.Error)
 	}
 }
+
+func TestBrewSetupIsBuiltIn(t *testing.T) {
+	o := origin(t)
+	write(t, o, map[string]string{"main.go": "package main\n\nfunc main() {}\n"})
+	for _, args := range [][]string{{"add", "."}, {"commit", "--quiet", "-m", "code"}} {
+		c := exec.Command("git", args...)
+		c.Dir = o
+		c.CombinedOutput()
+	}
+	f, _ := config.Parse([]byte("version: 1\nrepos:\n  - {name: x, url: " + o + ", github: o/x}\npolicy:\n  classes: {release: {start: review}}\nhomebrew: {tap: o/homebrew-tap}\n"))
+	st, _ := store.Open(filepath.Join(t.TempDir(), "m.db"))
+	defer st.Close()
+	x := &Executor{Fleet: f, Store: st, Adapter: &stepwise{}, WorkRoot: t.TempDir()}
+	rec, err := x.Execute(context.Background(), BrewSetupJob, "x", Options{ID: "abcd1234", NoPR: true})
+	if err != nil || rec.ID != "abcd1234" || rec.Status != store.Committed {
+		t.Errorf("%+v %v", rec, err)
+	}
+}

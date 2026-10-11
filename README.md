@@ -167,7 +167,8 @@ Working today:
   deploy key the workflow pushes with needs admin rights the app doesn't
   have, so you run `marshal tap-key <repo>` once. It uses your own gh
   login, and the private key goes from memory to the repo secret without
-  touching disk.
+  touching disk. `marshal trigger brew-setup <repo>` runs the same check on
+  its own, without onboarding's agent run.
 
 - Dependabot triage. With a `dependabot` class in the policy, MARSHAL
   checks every repo for Dependabot PRs every 10 minutes and runs the

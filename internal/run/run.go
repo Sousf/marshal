@@ -67,6 +67,18 @@ const Label = "marshal"
 // nothing to do, or a diff that policy refused, is a normal outcome and is
 // reported through the record's Status.
 func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts Options) (store.Run, error) {
+	if jobName == BrewSetupJob {
+		// Built in, needs no entry in the fleet: no agent, no spend, and
+		// its result is a PR the operator reviews.
+		repo, ok := x.Fleet.Repo(repoName)
+		if !ok {
+			return store.Run{}, fmt.Errorf("unknown repo %q", repoName)
+		}
+		if x.Fleet.Homebrew.Tap == "" {
+			return store.Run{}, fmt.Errorf("brew-setup needs homebrew.tap in the fleet file")
+		}
+		return x.brewSetup(ctx, repo, opts)
+	}
 	job, ok := x.Fleet.Job(jobName)
 	if !ok {
 		return store.Run{}, fmt.Errorf("unknown job %q", jobName)
