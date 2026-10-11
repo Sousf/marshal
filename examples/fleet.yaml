@@ -42,9 +42,13 @@ defaults:
     - "Bash(curl:*)"
     - "Bash(wget:*)"
     - "Bash(sudo:*)"
+  # Commit identity until a GitHub App is configured. The domain is reserved
+  # by RFC 2606 so it can never resolve to a GitHub account: an address of
+  # the form <name>@users.noreply.github.com would credit whoever owns that
+  # username, which happened once and is not happening again.
   identity:
     name: MARSHAL
-    email: marshal@users.noreply.github.com
+    email: marshal@marshal.invalid
 
 repos:
   - name: marshal
