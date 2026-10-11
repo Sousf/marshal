@@ -33,6 +33,10 @@ Rules the code enforces, which no change may weaken:
   briefs is data the harness already holds, labelled as not instructions.
 - A task without a repository gets no tokens and no repository; it writes
   only to its scratch directory.
+- Pre-flight runs before every commit, derived from workflows when there
+  is no contract, and every gate verb must pass before a PR is opened.
+  Regressions always block; `--allow-red` only excuses pre-existing
+  failures.
 - With a contract, the gate is deterministic: a verb that passed at
   baseline and fails after the agent blocks the commit, in Go. Contract
   verbs run with credentials scrubbed. `marshal.yaml` in this repo is the

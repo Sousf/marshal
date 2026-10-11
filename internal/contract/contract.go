@@ -25,10 +25,11 @@ const File = "marshal.yaml"
 
 // Verbs in the order they are run and reported. A repository may define any
 // subset; unknown names are rejected so a typo cannot silently skip a gate.
-var Verbs = []string{"build", "test", "lint", "vuln", "format", "smoke"}
+var Verbs = []string{"build", "test", "lint", "vuln", "format", "smoke", "ci"}
 
-// Gate lists the verbs the harness refuses to regress.
-var Gate = []string{"build", "test", "lint", "format"}
+// Gate lists the verbs the harness refuses to regress. ci is what the
+// repository's pull-request workflow runs, derived or declared.
+var Gate = []string{"build", "test", "lint", "format", "ci"}
 
 // Contract is a parsed marshal.yaml.
 type Contract struct {
@@ -41,15 +42,27 @@ type Contract struct {
 	Sensitive []string `yaml:"sensitive"`
 	// Timeout per verb; zero means ten minutes.
 	Timeout time.Duration `yaml:"timeout"`
+	// Env is added to every verb's environment; derived contracts use it
+	// to pin the Go toolchain CI would install.
+	Env []string `yaml:"env"`
+	// Derived marks a contract synthesised from workflows rather than read
+	// from marshal.yaml.
+	Derived bool `yaml:"-"`
 }
 
-// Load reads the contract from a checkout. ok is false when the file is
-// absent, which is not an error: the repository simply has no contract yet.
+// Load reads the contract from a checkout: marshal.yaml when present, else
+// one derived from the pull-request workflows. ok is false when neither
+// exists, which is not an error: the repository simply has no checks yet.
 func Load(dir string) (*Contract, bool, error) {
 	b, err := os.ReadFile(filepath.Join(dir, File))
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, false, nil
+			d, ok, derr := Derive(dir)
+			if derr != nil || !ok {
+				return nil, false, derr
+			}
+			d.Contract.Derived = true
+			return d.Contract, true, nil
 		}
 		return nil, false, err
 	}
@@ -131,7 +144,7 @@ func (c *Contract) Run(ctx context.Context, dir, verb string) Result {
 	sh := exec.CommandContext(ctx, "sh", "-c", cmd)
 	sh.Dir = dir
 	// No credentials reach a verb: it is the repository's own command line.
-	sh.Env = scrub(os.Environ())
+	sh.Env = append(scrub(os.Environ()), c.Env...)
 	sh.WaitDelay = 5 * time.Second
 	var out tail
 	sh.Stdout = &out
@@ -215,7 +228,16 @@ func (c *Contract) Brief(baseline []Result) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("## The repository's contract (marshal.yaml)\n\nThese are the exact commands this repository is built and checked with. Use them rather than guessing; MARSHAL runs them itself after you finish and refuses a change that makes one of them fail that passed before.\n\n")
+	if c.Derived {
+		b.WriteString("## The repository's checks (derived from its pull-request workflow)\n\nThere is no marshal.yaml, so these come from the CI workflow. They are what GitHub will run on the pull request; MARSHAL runs them here first and will not open a pull request whose own checks fail.\n\n")
+	} else {
+		b.WriteString("## The repository's contract (marshal.yaml)\n\nThese are the exact commands this repository is built and checked with. Use them rather than guessing; MARSHAL runs them itself after you finish and refuses a change that makes one of them fail that passed before.\n\n")
+	}
+	for _, e := range c.Env {
+		if strings.HasPrefix(e, "GOTOOLCHAIN=") {
+			fmt.Fprintf(&b, "CI builds with %s, so these run with that toolchain here too; a newer local Go can hide failures CI will see.\n\n", strings.TrimPrefix(e, "GOTOOLCHAIN="))
+		}
+	}
 	for _, v := range Verbs {
 		if c.Has(v) {
 			fmt.Fprintf(&b, "- %s: `%s`\n", v, c.Verbs[v])

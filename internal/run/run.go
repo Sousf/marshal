@@ -41,6 +41,9 @@ type Options struct {
 	ID string
 	// Force runs the agent even when the job's probe finds nothing to do.
 	Force bool
+	// AllowRed opens the pull request even when the repository's own checks
+	// fail on it, as long as nothing that passed before was broken.
+	AllowRed bool
 }
 
 // Executor holds what every run needs.
@@ -238,6 +241,17 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		return finish(store.NoChange, "")
 	}
 
+	// Pre-flight first, so the policy check sees the tree the agent ends
+	// with, fixes included.
+	gate, blocked := x.preflight(ctx, ws, baseline, req, &result, rec, opts, logf)
+	rec.Summary = result.Output // pre-flight fixes append to the report
+	if blocked != "" {
+		return finish(store.Blocked, blocked)
+	}
+	if changed, _ = ws.Changed(ctx); !changed {
+		logf("note", "no changes remain after pre-flight")
+		return finish(store.NoChange, "")
+	}
 	numstat, err := ws.Numstat(ctx)
 	if err != nil {
 		return finish(store.Failed, err.Error())
@@ -257,10 +271,6 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		return finish(store.Blocked, strings.TrimSpace(b.String()))
 	}
 	logf("note", "policy ok: %d files", len(changes))
-	gate, regressions := x.gate(ctx, con, baseline, ws.Dir, logf)
-	if len(regressions) > 0 {
-		return finish(store.Blocked, "gate: the change breaks what passed before:\n"+contract.Summary(regressions)+"\n"+contract.Failures(regressions, 2000))
-	}
 	if con != nil {
 		if touched := policy.Touches(con.Sensitive, changes); len(touched) > 0 {
 			rec.Sensitive = true
@@ -430,6 +440,15 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 		logf("note", "no changes")
 		return finish(store.NoChange, "")
 	}
+	gate, blocked := x.preflight(ctx, ws, baseline, req, &result, rec, opts, logf)
+	rec.Summary = result.Output // pre-flight fixes append to the report
+	if blocked != "" {
+		return finish(store.Blocked, blocked)
+	}
+	if changed, _ = ws.Changed(ctx); !changed {
+		logf("note", "no changes remain after pre-flight")
+		return finish(store.NoChange, "")
+	}
 	numstat, err := ws.Numstat(ctx)
 	if err != nil {
 		return finish(store.Failed, err.Error())
@@ -452,10 +471,6 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 			logf("blocked", "%s", x.String())
 		}
 		return finish(store.Blocked, strings.TrimSpace(vb.String()))
-	}
-	gate, regressions := x.gate(ctx, con, baseline, ws.Dir, logf)
-	if len(regressions) > 0 {
-		return finish(store.Blocked, "gate: the fix breaks what passed before:\n"+contract.Summary(regressions)+"\n"+contract.Failures(regressions, 2000))
 	}
 	if con != nil && len(policy.Touches(con.Sensitive, changes)) > 0 {
 		rec.Sensitive = true
@@ -494,21 +509,107 @@ func (x *Executor) baseline(ctx context.Context, dir string, logf func(kind, for
 	return con, results
 }
 
-// gate re-runs the gate verbs after the agent and returns the results and
-// the regressions among them.
-func (x *Executor) gate(ctx context.Context, con *contract.Contract, baseline []contract.Result, dir string, logf func(kind, format string, args ...any)) ([]contract.Result, []contract.Result) {
-	if con == nil {
-		return nil, nil
+// preflightRetries is how many times the agent gets the failing output
+// back to fix before the run is blocked.
+const preflightRetries = 2
+
+// preflight runs the repository's checks on the changed tree, the way
+// GitHub will on the pull request, and gives the agent the failures to
+// fix before anything is committed. The contract is reloaded from the work
+// tree, so a workflow the agent added or changed is what gets run.
+//
+// Two rules decide what must pass. A verb that passed at baseline and fails
+// now is always a regression. When the change touches the workflows, every
+// gate verb must pass outright: a pull request that adds or edits CI and
+// then fails that CI is exactly the red PR this exists to prevent. Other
+// pre-existing failures are reported, not blamed. Returns the final gate
+// results and, if the run must stop, the reason.
+func (x *Executor) preflight(ctx context.Context, ws *workspace.Workspace, baseline []contract.Result, req runner.Request, result *runner.Result, rec *store.Run, opts Options, logf func(kind, format string, args ...any)) ([]contract.Result, string) {
+	for attempt := 0; ; attempt++ {
+		// Reload each time: the agent may have added or changed the
+		// workflow the checks derive from.
+		con, ok, err := contract.Load(ws.Dir)
+		if err != nil || !ok {
+			return nil, ""
+		}
+		after := con.RunAll(ctx, ws.Dir, contract.Gate...)
+		for _, r := range after {
+			logf("note", "pre-flight %s", r)
+		}
+		// Everything must pass before a pull request is opened: the
+		// operator's job is to review, not to wait for fixes. Regressions
+		// are named as such; pre-existing failures are the agent's to fix
+		// too, and only --allow-red lets those through.
+		regressions := map[string]bool{}
+		for _, r := range contract.Regressions(baseline, after) {
+			regressions[r.Verb] = true
+		}
+		var failing []contract.Result
+		for _, r := range after {
+			if !r.OK && !r.Unavailable {
+				failing = append(failing, r)
+			}
+		}
+		if len(failing) == 0 {
+			return after, ""
+		}
+		if attempt >= preflightRetries || ctx.Err() != nil {
+			if opts.AllowRed && len(regressions) == 0 {
+				logf("note", "pre-flight still fails but --allow-red was given; opening anyway")
+				return after, ""
+			}
+			why := "pre-flight: the pull request's own checks fail"
+			if len(regressions) > 0 {
+				why = "pre-flight: the change breaks what passed before"
+			}
+			for _, r := range failing {
+				tag := "pre-existing"
+				if regressions[r.Verb] {
+					tag = "regression"
+				}
+				logf("blocked", "pre-flight: %s (%s)", r, tag)
+			}
+			return after, why + ":\n" + contract.Summary(failing) + "\n" + contract.Failures(failing, 2000)
+		}
+		logf("note", "pre-flight failed; giving the agent the output to fix (attempt %d of %d)", attempt+1, preflightRetries)
+		fix := req
+		fix.Prompt = preflightBrief(failing) + jobs.Contract
+		again, err := x.Adapter.Run(ctx, fix, func(e runner.Event) { logf(string(e.Kind), "%s", e.Text) })
+		result.Turns += again.Turns
+		result.CostUSD += again.CostUSD
+		result.Denials = append(result.Denials, again.Denials...)
+		rec.Turns, rec.CostUSD = result.Turns, result.CostUSD
+		if err != nil || again.IsError {
+			msg := "agent error during pre-flight fix"
+			if err != nil {
+				msg = err.Error()
+			} else if again.Output != "" {
+				msg = firstLine(again.Output)
+			}
+			return after, "pre-flight: " + msg
+		}
+		if strings.TrimSpace(again.Output) != "" {
+			result.Output = strings.TrimSpace(result.Output) + "\n\n## Pre-flight fixes\n\n" + strings.TrimSpace(again.Output)
+		}
+		// New files the fix added must be staged for the next numstat and
+		// for the commit; the gate verbs see the tree either way.
+		_, _ = ws.Numstat(ctx)
 	}
-	after := con.RunAll(ctx, dir, contract.Gate...)
-	for _, r := range after {
-		logf("note", "gate %s", r)
-	}
-	reg := contract.Regressions(baseline, after)
-	for _, r := range reg {
-		logf("blocked", "gate: %s passed before this change and fails now", r.Verb)
-	}
-	return after, reg
+}
+
+// preflightBrief is the prompt for a fix attempt.
+func preflightBrief(failing []contract.Result) string {
+	var b strings.Builder
+	b.WriteString("# Pre-flight failed\n\nMARSHAL ran the checks this pull request will be held to, in this checkout, after your change, and they fail. Every one of them must pass before the pull request can be opened, including any that were already failing before you started: the operator reviews green pull requests only. Fix them now, in this same checkout.\n\n")
+	b.WriteString(contract.Summary(failing) + "\n" + contract.Failures(failing, 6000))
+	b.WriteString(`Rules:
+
+- Fix the cause. If the failure is in your change, fix the change. If a check you added found a real problem in the repository, fix the problem; a check that is red on the pull request that adds it is not finished.
+- Do not widen the scope beyond what the checks require, and do not skip, delete or loosen a test or a check to make it pass.
+- Run the failing commands yourself before you finish.
+- Then write your report again in full, since it replaces the earlier one as the pull request body: title line, blank line, what changed and why, how you verified it, and a short section on what pre-flight found and what you did about it.
+`)
+	return b.String()
 }
 
 // gateSection renders the contract results for a PR body.

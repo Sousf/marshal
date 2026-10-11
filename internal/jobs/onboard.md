@@ -24,7 +24,25 @@ the report.
    anything an automated maintainer must not touch (release workflows,
    signing, generated files). Keep it under forty lines and factual; do not
    invent conventions the code does not show.
-4. **Report what you could not do.** Branch protection and required checks
+4. **A contract.** If `marshal.yaml` is missing at the root, write one
+   naming how this repository is built and checked, one command per verb,
+   mirroring what the CI workflow runs so the two never disagree:
+
+   ```yaml
+   contract: 1
+   verbs:
+     build:  go build ./...
+     test:   go test ./...
+     lint:   go vet ./...
+     vuln:   govulncheck ./...
+     format: test -z "$(gofmt -l .)"
+   locked: []
+   sensitive: []
+   ```
+
+   Only include verbs the repository can actually run. MARSHAL runs them
+   before and after every change it makes here.
+5. **Report what you could not do.** Branch protection and required checks
    are repository settings, not files; if `gh api repos/<owner>/<repo>/branches/<default>/protection`
    shows none, say so in the report with the settings to enable. Do not try
    to change settings.

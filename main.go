@@ -62,6 +62,7 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
       --no-pr                       commit on a local branch only, open nothing
       --keep                        leave the work tree on disk
       --force                       run the agent even if the job's probe finds nothing to do
+      --allow-red                   open the PR even if its own checks fail, as long as nothing regressed
   marshal trigger <job> <repo>    ask the daemon to run a job in the background (--force skips the probe)
   marshal fix <run-id>            ask the daemon to push a fix to that proposal's PR now, outside the cap
   marshal task "<instruction>"    run a free-form task via the daemon; --repo <name> ends in a PR, without it a report
@@ -865,6 +866,8 @@ func cmdRun(ctx context.Context, f *config.Fleet, args []string) error {
 			opts.Keep = true
 		case "--force":
 			opts.Force = true
+		case "--allow-red":
+			opts.AllowRed = true
 		default:
 			if strings.HasPrefix(a, "-") {
 				return fmt.Errorf("unknown flag %q", a)
@@ -873,7 +876,7 @@ func cmdRun(ctx context.Context, f *config.Fleet, args []string) error {
 		}
 	}
 	if len(pos) != 2 {
-		return errors.New("usage: marshal run <job> <repo> [--no-pr] [--keep] [--force]")
+		return errors.New("usage: marshal run <job> <repo> [--no-pr] [--keep] [--force] [--allow-red]")
 	}
 	st, err := openStore()
 	if err != nil {

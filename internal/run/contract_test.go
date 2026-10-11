@@ -35,6 +35,18 @@ func withContract(t *testing.T, dir string) {
 	git("commit", "-q", "-m", "contract")
 }
 
+// withCleanContract is withContract without the always-red lint verb.
+func withCleanContract(t *testing.T, dir string) {
+	t.Helper()
+	os.WriteFile(filepath.Join(dir, "marshal.yaml"), []byte("contract: 1\nverbs:\n  build: 'true'\n  test: 'test -f keep.txt'\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("x"), 0o644)
+	for _, args := range [][]string{{"add", "."}, {"commit", "-q", "-m", "contract"}} {
+		if out, err := execCommand(dir, args...).CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}
+
 func TestContractBaselineAndGate(t *testing.T) {
 	ctx := context.Background()
 	o := origin(t)
@@ -51,15 +63,17 @@ func TestContractBaselineAndGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rec.Status != store.Blocked || !strings.Contains(rec.Error, "gate") || !strings.Contains(rec.Error, "test: FAIL") {
+	if rec.Status != store.Blocked || !strings.Contains(rec.Error, "breaks what passed before") || !strings.Contains(rec.Error, "test: FAIL") {
 		t.Errorf("%+v\n%s", rec, log.String())
 	}
 	if !strings.Contains(log.String(), "baseline test: pass") || !strings.Contains(log.String(), "baseline lint: FAIL") {
 		t.Errorf("baseline not logged:\n%s", log.String())
 	}
 
-	// A harmless change passes the gate even though lint was already red,
-	// and the brief carried the contract and the pre-existing failure.
+	// A harmless change on a repo whose lint was already red: every check
+	// must pass before a PR, so it is blocked as pre-existing, and only
+	// --allow-red lets it through. The brief carried the contract and the
+	// baseline either way.
 	rec2 := &recording{output: "Add file\n\nbody", write: func(d string) { os.WriteFile(filepath.Join(d, "new.txt"), []byte("y"), 0o644) }}
 	x.Adapter = rec2
 	log.Reset()
@@ -67,11 +81,15 @@ func TestContractBaselineAndGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r2.Status != store.Committed {
+	if r2.Status != store.Blocked || !strings.Contains(r2.Error, "own checks fail") || !strings.Contains(log.String(), "lint: FAIL (1ms) (pre-existing)") && !strings.Contains(log.String(), "(pre-existing)") {
 		t.Errorf("%+v\n%s", r2, log.String())
 	}
-	if !strings.Contains(rec2.req.Prompt, "- test: `test -f keep.txt`") || !strings.Contains(rec2.req.Prompt, "pre-existing") {
+	if !strings.Contains(rec2.first.Prompt, "- test: `test -f keep.txt`") || !strings.Contains(rec2.first.Prompt, "pre-existing") {
 		t.Error("brief should carry the contract and the baseline")
+	}
+	r2b, _ := x.Execute(ctx, "anywhere", "x", Options{NoPR: true, AllowRed: true})
+	if r2b.Status != store.Committed {
+		t.Errorf("allow-red should open past a pre-existing failure: %+v", r2b)
 	}
 
 	// Contract locks apply; sensitive paths flag the run.
@@ -79,7 +97,7 @@ func TestContractBaselineAndGate(t *testing.T) {
 		os.MkdirAll(filepath.Join(d, "deploy"), 0o755)
 		os.WriteFile(filepath.Join(d, "deploy", "x.sh"), []byte("x"), 0o644)
 	}, output: "Deploy\n\nbody"}
-	r3, _ := x.Execute(ctx, "anywhere", "x", Options{NoPR: true})
+	r3, _ := x.Execute(ctx, "anywhere", "x", Options{NoPR: true, AllowRed: true})
 	if r3.Status != store.Blocked || !strings.Contains(r3.Error, "locked") {
 		t.Errorf("contract lock: %+v", r3)
 	}
@@ -87,7 +105,7 @@ func TestContractBaselineAndGate(t *testing.T) {
 		os.MkdirAll(filepath.Join(d, "auth"), 0o755)
 		os.WriteFile(filepath.Join(d, "auth", "x.go"), []byte("package auth\n"), 0o644)
 	}, output: "Auth change\n\nbody"}
-	r4, _ := x.Execute(ctx, "anywhere", "x", Options{NoPR: true})
+	r4, _ := x.Execute(ctx, "anywhere", "x", Options{NoPR: true, AllowRed: true})
 	if r4.Status != store.Committed || !r4.Sensitive {
 		t.Errorf("sensitive: %+v", r4)
 	}

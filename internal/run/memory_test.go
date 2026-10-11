@@ -37,13 +37,19 @@ func memOrigin(t *testing.T) string {
 
 type recording struct {
 	output string
-	req    runner.Request
+	req    runner.Request // the last request seen
+	first  runner.Request // the first, before any pre-flight fix prompt
+	calls  int
 	write  func(dir string)
 }
 
 func (*recording) Name() string    { return "rec" }
 func (*recording) Available() bool { return true }
 func (r *recording) Run(_ context.Context, req runner.Request, emit func(runner.Event)) (runner.Result, error) {
+	if r.calls == 0 {
+		r.first = req
+	}
+	r.calls++
 	r.req = req
 	if r.write != nil {
 		r.write(req.Dir)

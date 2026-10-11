@@ -104,6 +104,16 @@ Working today:
   flip the kill switch, in conversation. It cannot edit files or use git or
   gh. The conversation resumes across openings; `--new` starts over.
 
+- Pre-flight. Before any pull request is opened, MARSHAL runs the checks
+  GitHub will run on it, in the checkout, after the agent's change. With
+  no `marshal.yaml` it derives them from the pull-request workflow, running
+  the `run:` steps in order with the Go toolchain `setup-go` would install,
+  so a newer local Go cannot hide what CI will see. Failures go back to the
+  agent to fix in the same checkout, twice at most, including failures that
+  were already there. Nothing is opened until every check passes: your job
+  is to review green pull requests, not to wait for fixes to land. A change
+  that breaks something that passed before can never be opened;
+  `--allow-red` lets a pre-existing failure through, nothing else.
 - Spend control. Before any agent starts, the job's probe checks the
   checkout without a model: the contract's `vuln` verb or govulncheck for
   vuln-fix, unpinned actions and missing permissions or Dependabot for
