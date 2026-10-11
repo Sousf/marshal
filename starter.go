@@ -65,6 +65,9 @@ repos:
   - name: system-patch
     url: git@github.com:Sousf/system-patch.git
     jobs: [onboard, posture-audit, vuln-fix, ci-fix]
+  - name: arch-rice
+    url: git@github.com:Sousf/arch-rice.git
+    jobs: [onboard, posture-audit, ci-fix]
 
 jobs:
   # Jobs may touch the whole repository except the always-locked paths
