@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 
 	"github.com/Sousf/marshal/internal/store"
 )
@@ -31,6 +32,9 @@ func (m Model) View() string {
 			body = m.viewDashboard()
 		case runs:
 			body = m.runList.render("No runs yet. Press n to start one, or wait for a schedule.")
+			if p := m.previewRows(); p > 0 {
+				body = padLines(body, m.runList.height) + "\n" + m.viewPreview(p)
+			}
 		case trust:
 			body = m.viewTrust()
 		case detail:
@@ -63,6 +67,81 @@ func versionLabel(v string) string {
 		return "v" + v
 	}
 	return v
+}
+
+// padLines pads s with blank lines to exactly n lines.
+func padLines(s string, n int) string {
+	c := strings.Count(s, "\n") + 1
+	if c >= n {
+		return clipLines(s, n)
+	}
+	return s + strings.Repeat("\n", n-c)
+}
+
+// viewPreview is the log pane: the selected run's latest events, live.
+func (m Model) viewPreview(rows int) string {
+	var b strings.Builder
+	title := "log"
+	if m.runList.selected() != nil {
+		title = "log · run " + m.visible[m.runList.cursor].ID
+	}
+	rule := strings.Repeat("─", max(m.width-6-lipgloss.Width(title), 4))
+	b.WriteString(" " + sRule.Render("── ") + sHeader.Render(title) + " " + sRule.Render(rule) + "\n")
+	rows-- // the rule
+	sel := ""
+	if m.runList.selected() != nil {
+		sel = m.visible[m.runList.cursor].ID
+	}
+	if sel == "" || m.preview.id != sel {
+		b.WriteString(" " + sDim.Render("loading…"))
+		return b.String()
+	}
+	lines := m.eventLines(m.preview.events, true)
+	if r := m.preview.run; r.Status != store.Running && r.Summary != "" {
+		first, _, _ := strings.Cut(strings.TrimSpace(r.Summary), "\n")
+		lines = append(lines, " "+sDim.Render("report  ")+first)
+	}
+	if len(lines) == 0 {
+		lines = []string{" " + sDim.Render("no events yet")}
+	}
+	if len(lines) > rows {
+		lines = lines[len(lines)-rows:]
+	}
+	for i, l := range lines {
+		b.WriteString(ansi.Truncate(l, m.width-1, "…"))
+		if i < len(lines)-1 {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// eventLines renders events as the transcript does. With compact set, the
+// agent's text events show their first line only.
+func (m Model) eventLines(events []store.Event, compact bool) []string {
+	var out []string
+	for _, e := range events {
+		var kind string
+		switch e.Kind {
+		case "tool":
+			kind = sDim.Render("tool   ")
+		case "denied", "blocked":
+			kind = sBad.Render(fmt.Sprintf("%-7s", e.Kind))
+		case "text":
+			kind = lipgloss.NewStyle().Foreground(accent).Render("text   ")
+		default:
+			kind = sFaint.Render(fmt.Sprintf("%-7s", e.Kind))
+		}
+		text := e.Text
+		if e.Kind == "text" || compact {
+			text, _, _ = strings.Cut(text, "\n")
+			if text == "" {
+				text = "…"
+			}
+		}
+		out = append(out, fmt.Sprintf(" %s %s %s", sFaint.Render(e.At.Format("15:04:05")), kind, text))
+	}
+	return out
 }
 
 // clipLines keeps the first n lines so a body can never push the footer off
@@ -165,7 +244,7 @@ func (m Model) footer() string {
 	case m.screen == dashboard:
 		keys = [][2]string{{"j/k", "repo"}, {"enter", "start job"}, {"o", "its runs"}, {"a", "autonomy"}, {"?", "help"}, {"q", "quit"}}
 	case m.screen == runs:
-		keys = [][2]string{{"j/k", "move"}, {"enter", "open"}, {"/", "filter"}, {"o", "open PR"}, {"n", "new run"}, {"?", "help"}, {"q", "quit"}}
+		keys = [][2]string{{"j/k", "select"}, {"enter", "full log"}, {"/", "filter"}, {"o", "open PR"}, {"n", "new run"}, {"?", "help"}, {"q", "quit"}}
 	case m.screen == trust:
 		keys = [][2]string{{"j/k", "move"}, {"a", "autonomy"}, {"?", "help"}, {"q", "quit"}}
 	case m.screen == detail:
@@ -327,28 +406,10 @@ func (m Model) renderDetail() string {
 		b.WriteString(" " + sDim.Render("follow-up of run "+r.Parent) + "\n")
 	}
 	b.WriteString(" " + sRule.Render(strings.Repeat("─", max(m.width-4, 10))) + "\n")
-	for _, e := range m.events {
-		var kind string
-		switch e.Kind {
-		case "tool":
-			kind = sDim.Render("tool   ")
-		case "denied", "blocked":
-			kind = sBad.Render(fmt.Sprintf("%-7s", e.Kind))
-		case "text":
-			kind = lipgloss.NewStyle().Foreground(accent).Render("text   ")
-		default:
-			kind = sFaint.Render(fmt.Sprintf("%-7s", e.Kind))
-		}
-		text := e.Text
-		if e.Kind == "text" {
-			// The final text is the report, rendered in full below; in the
-			// stream show its first line only so the tool calls stay dense.
-			text, _, _ = strings.Cut(text, "\n")
-			if text == "" {
-				text = "…"
-			}
-		}
-		b.WriteString(fmt.Sprintf(" %s %s %s\n", sFaint.Render(e.At.Format("15:04:05")), kind, text))
+	// The final text is the report, rendered in full below; in the stream
+	// text events show their first line only so the tool calls stay dense.
+	for _, l := range m.eventLines(m.events, false) {
+		b.WriteString(l + "\n")
 	}
 	if r.Summary != "" && r.Status != store.Running {
 		b.WriteString(" " + sRule.Render(strings.Repeat("─", max(m.width-4, 10))) + "\n")

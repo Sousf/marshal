@@ -63,24 +63,19 @@ repos:
     jobs: [onboard, posture-audit, vuln-fix, ci-fix]
 
 jobs:
+  # Jobs may touch the whole repository except the always-locked paths
+  # (release workflows, signing config, key material). A job can be confined
+  # with a paths: list of globs, but a confined job cannot fix what its own
+  # change breaks elsewhere, so none of these are.
   - name: onboard
     description: add CI on pull requests, dependabot, and AGENTS.md where missing
     schedule: manual
     class: hardening
-    paths:
-      - ".github/workflows/ci.yml"
-      - ".github/dependabot.yml"
-      - "AGENTS.md"
-    max_diff_lines: 300
+    max_diff_lines: 400
   - name: posture-audit
     description: pin actions, tighten permissions, dependabot, govulncheck
     schedule: weekly
     class: hardening
-    paths:
-      - ".github/workflows/*.yml"
-      - ".github/dependabot.yml"
-      - "go.mod"
-      - "go.sum"
     max_diff_lines: 400
   - name: vuln-fix
     description: fix what govulncheck reports

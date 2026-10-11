@@ -411,6 +411,9 @@ func TestRedChecksGetFixedWithinCap(t *testing.T) {
 	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "FAILURE", Title: "Pin things", Body: "body"}}}
 	d, a, dir := newDaemonDir(t, gh)
 	a.fix = func(wd string) { os.WriteFile(filepath.Join(wd, "fixed.txt"), []byte("ok\n"), 0o644) }
+	// The parent job is confined to go.mod; the fix touches another file
+	// and must still go through, because follow-ups fix whatever broke.
+	d.Fleet.Jobs[0].Paths = []string{"go.mod"}
 	r := proposalIn(t, d, gh, dir, "hardening", "u", time.Now())
 	head1 := gh.prs["u"].HeadSHA
 

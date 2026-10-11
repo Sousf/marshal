@@ -341,7 +341,13 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 		return finish(store.Failed, err.Error())
 	}
 	changes := policy.ParseNumstat(numstat)
-	if v := policy.Check(job, changes); len(v) > 0 {
+	// A follow-up fixes whatever the checks or the reviewer pointed at,
+	// which is often code the original job was confined away from. The
+	// job's path list does not apply to it; the always-locked set and the
+	// size cap still do, and the verifier reads the whole diff.
+	fixJob := job
+	fixJob.Paths = nil
+	if v := policy.Check(fixJob, changes); len(v) > 0 {
 		var vb strings.Builder
 		for _, x := range v {
 			vb.WriteString(x.String() + "\n")

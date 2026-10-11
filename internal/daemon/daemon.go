@@ -414,8 +414,11 @@ func (d *Daemon) fixChecks(ctx context.Context, repo config.Repo, r store.Run, p
 		if f.Status == store.Running {
 			return // one at a time
 		}
-		if f.BaseHead == pr.HeadSHA && pr.HeadSHA != "" {
-			return // this head was already attempted; wait for a new push or a human
+		// A head the agent already worked on is not retried; a Blocked
+		// attempt is the harness refusing the diff, which a policy change
+		// can resolve, so it counts toward the cap but not against the head.
+		if f.BaseHead == pr.HeadSHA && pr.HeadSHA != "" && f.Status != store.Blocked {
+			return
 		}
 		if f.Status == store.Pushed || f.Status == store.NoChange || f.Status == store.Failed || f.Status == store.Blocked {
 			attempts++

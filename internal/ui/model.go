@@ -78,6 +78,13 @@ type Model struct {
 	// pick modal
 	pickRepo config.Repo
 	pickIdx  int
+
+	// preview is the selected run's log under the list.
+	preview struct {
+		id     string
+		run    store.Run
+		events []store.Event
+	}
 }
 
 // New builds the model.
@@ -125,6 +132,12 @@ type detailLoaded struct {
 	err     error
 }
 
+type previewLoaded struct {
+	id     string
+	run    store.Run
+	events []store.Event
+}
+
 type actionDone struct {
 	msg string
 	err error
@@ -157,6 +170,34 @@ func (m Model) refresh() tea.Cmd {
 			r.err = err
 		}
 		return r
+	}
+}
+
+// previewRows is how many lines the log pane gets; zero means no pane.
+func (m Model) previewRows() int {
+	body := m.bodyHeight()
+	if body < 14 {
+		return 0
+	}
+	return body * 2 / 5
+}
+
+// loadPreview fetches the selected run's events for the pane.
+func (m Model) loadPreview() tea.Cmd {
+	if m.screen != runs || m.previewRows() == 0 || m.runList.selected() == nil {
+		return nil
+	}
+	id := m.visible[m.runList.cursor].ID
+	src := m.src
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		run, err := src.Run(ctx, id)
+		if err != nil {
+			return nil
+		}
+		ev, _ := src.EventsAfter(ctx, id, 0)
+		return previewLoaded{id: id, run: run, events: ev}
 	}
 }
 
@@ -202,7 +243,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == detail && (m.run.Status == store.Running || m.run.Status == "") {
 			cmds = append(cmds, m.loadDetail(m.run.ID, m.lastSq))
 		}
+		if m.screen == runs {
+			cmds = append(cmds, m.loadPreview())
+		}
 		return m, tea.Batch(cmds...)
+	case previewLoaded:
+		m.preview.id, m.preview.run, m.preview.events = msg.id, msg.run, msg.events
+		return m, nil
 	case refreshed:
 		if msg.err != nil {
 			m.srcErr = msg.err.Error()
@@ -211,6 +258,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status, m.runs, m.trust = msg.status, msg.runs, msg.trust
 		m.fillLists()
+		if m.screen == runs && m.preview.id == "" {
+			return m, m.loadPreview()
+		}
 		return m, nil
 	case detailLoaded:
 		if msg.err != nil {
@@ -275,6 +325,9 @@ func (m *Model) layout() {
 	body := m.bodyHeight()
 	m.runList.width = m.width - 2
 	m.runList.height = body
+	if p := m.previewRows(); p > 0 {
+		m.runList.height = body - p - 1 // one row for the rule
+	}
 	m.trustList.width = m.width - 2
 	m.trustList.height = body
 	m.view.Width = m.width - 2
@@ -403,7 +456,7 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case runs:
 		return m.keyRuns(s)
 	case trust:
-		return m.keyList(&m.trustList, s)
+		return m.keyList(trust, s)
 	case detail:
 		return m.keyDetail(k)
 	}
@@ -413,10 +466,21 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) goTo(s screen) (tea.Model, tea.Cmd) {
 	m.screen = s
 	m.layout()
+	if s == runs {
+		return m, m.loadPreview()
+	}
 	return m, nil
 }
 
-func (m Model) keyList(l *list, s string) (tea.Model, tea.Cmd) {
+// keyList moves the cursor of the screen's list. It picks the list off its
+// own receiver: a *list into the caller's copy would move the caller's
+// copy while this copy, the one returned, stayed put. That was a bug once.
+func (m Model) keyList(which screen, s string) (tea.Model, tea.Cmd) {
+	l := &m.runList
+	if which == trust {
+		l = &m.trustList
+	}
+	before := l.cursor
 	switch s {
 	case "j", "down":
 		l.move(1)
@@ -430,6 +494,9 @@ func (m Model) keyList(l *list, s string) (tea.Model, tea.Cmd) {
 		l.move(max(l.height-2, 1))
 	case "pgup", "ctrl+u":
 		l.move(-max(l.height-2, 1))
+	}
+	if which == runs && l.cursor != before {
+		return m, m.loadPreview()
 	}
 	return m, nil
 }
@@ -481,7 +548,7 @@ func (m Model) keyRuns(s string) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
-	return m.keyList(&m.runList, s)
+	return m.keyList(runs, s)
 }
 
 func (m Model) keyFilter(k tea.KeyMsg) (tea.Model, tea.Cmd) {
