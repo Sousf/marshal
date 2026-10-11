@@ -333,3 +333,38 @@ func (w *Workspace) cmd(ctx context.Context, dir, name string, args ...string) *
 	c.Env = append(c.Env, "GIT_TERMINAL_PROMPT=0")
 	return c
 }
+
+// Git runs git in the work tree and returns its output. For the harness's
+// own deterministic jobs; the agent never reaches it.
+func (w *Workspace) Git(ctx context.Context, args ...string) (string, error) {
+	return w.git(ctx, args...)
+}
+
+// ForcePushTo replaces branch on origin with HEAD. Only for a branch
+// MARSHAL owns outright and rebuilds from the base each time, such as the
+// release branch; proposals are never force-pushed.
+func (w *Workspace) ForcePushTo(ctx context.Context, branch string) error {
+	_, err := w.git(ctx, "push", "--quiet", "--force", "origin", "HEAD:refs/heads/"+branch)
+	return err
+}
+
+// FindPR returns the URL of the open pull request from head into the base
+// branch, or "" when there is none.
+func (w *Workspace) FindPR(ctx context.Context, head string) (string, error) {
+	out, err := w.cmd(ctx, w.Dir, "gh", "pr", "list", "--head", head, "--base", w.Repo.Branch,
+		"--state", "open", "--json", "url", "--jq", ".[0].url // empty").Output()
+	if err != nil {
+		return "", fmt.Errorf("gh pr list: %w", err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// EditPR replaces a pull request's title and body.
+func (w *Workspace) EditPR(ctx context.Context, url, title, body string) error {
+	cmd := w.cmd(ctx, w.Dir, "gh", "pr", "edit", url, "--title", title, "--body-file", "-")
+	cmd.Stdin = strings.NewReader(body)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("gh pr edit: %w: %s", err, bytes.TrimSpace(out))
+	}
+	return nil
+}

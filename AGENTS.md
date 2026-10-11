@@ -55,6 +55,10 @@ Rules the code enforces, which no change may weaken:
   `run.HistoryCap`) and comes before the per-run sections.
 - The skill nudge has no tools and its answer goes through the same skill
   path as any proposal: `skills.Check`, then a memory-class PR.
+- The `release` job is Go, not an agent (`run/release.go`). It only
+  force-pushes `marshal/release`, which it rebuilds from the base every
+  time. `VERSION` and `CHANGELOG.md` are always locked for agents, and
+  release PRs get no follow-ups.
 - See `SECURITY.md`: in-process checks are heuristics; only OS isolation
   is a boundary. Do not describe an allowlist as one.
 - No autonomous merge without a PASS verdict bound to the PR's current head.

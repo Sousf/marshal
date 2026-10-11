@@ -75,6 +75,9 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	if !ok {
 		return store.Run{}, fmt.Errorf("unknown repo %q", repoName)
 	}
+	if job.Name == ReleaseJob {
+		return x.release(ctx, job, repo, opts)
+	}
 	return x.executeJob(ctx, job, repo, opts)
 }
 

@@ -50,6 +50,10 @@ var alwaysLocked = []string{
 	".env",
 	"**/.env",
 	".marshal/**",
+	// The release job writes these, deterministically, in a PR of its own.
+	// An agent that edits them could choose what ships.
+	"VERSION",
+	"CHANGELOG.md",
 }
 
 // alwaysAllowed may be touched by any job whatever its path list: the

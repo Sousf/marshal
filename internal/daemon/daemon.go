@@ -272,11 +272,11 @@ func (d *Daemon) tick(ctx context.Context) {
 	if d.NoSchedule {
 		return
 	}
-	if _, ok := d.held(ctx); ok {
-		return // scheduled work waits; it is due again the moment the hold lifts
-	}
 	if err := d.schedule(ctx); err != nil {
 		d.fail("schedule: %v", err)
+	}
+	if _, ok := d.held(ctx); ok {
+		return // tasks wait; they are due again the moment the hold lifts
 	}
 	if err := d.scheduleTasks(ctx); err != nil {
 		d.fail("tasks: %v", err)
@@ -338,6 +338,11 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			d.note(ctx, r.ID, "closed without merging")
 			d.move(ctx, ladder, repo, r.Class, policy.Rejected)
 		default:
+			// A release PR is the operator's call, and its files are
+			// MARSHAL's own bookkeeping: no agent follows up on it.
+			if r.Job == run.ReleaseJob {
+				continue
+			}
 			// Red checks on MARSHAL's own PR are MARSHAL's to fix, within a
 			// cap. Nothing else happens to the PR while it is red.
 			if pr.Checks == "FAILURE" {
@@ -1027,6 +1032,11 @@ func (d *Daemon) schedule(ctx context.Context) error {
 			if s.Manual() {
 				continue
 			}
+			// Under a quota hold only the release job, which uses no
+			// model, still runs; the rest are due again when it lifts.
+			if _, held := d.held(ctx); held && job.Name != run.ReleaseJob {
+				continue
+			}
 			last, err := d.Store.LastStarted(ctx, job.Name, repo.Name)
 			if err != nil {
 				return err
@@ -1169,7 +1179,7 @@ func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) 
 	if _, ok := d.Fleet.Repo(repo); !ok {
 		return "", fmt.Errorf("unknown repo %q", repo)
 	}
-	if err := d.heldErr(ctx); err != nil {
+	if err := d.heldErr(ctx); err != nil && job != run.ReleaseJob {
 		return "", err
 	}
 	d.mu.Lock()

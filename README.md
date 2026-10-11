@@ -148,6 +148,16 @@ Working today:
   to the full text. The stable part of a brief comes first and what
   changes per run comes last, so consecutive runs share a cacheable prefix.
 
+- Releases. The `release` job uses no agent and costs nothing. It keeps
+  one "Release vX.Y.Z" pull request open per repository: `VERSION` gets a
+  patch bump and `CHANGELOG.md` gets the titles of what merged since the
+  last tag. The job rebuilds the PR as more merges land. To ship a minor or
+  major release, edit `VERSION` on the branch; MARSHAL keeps a higher
+  version you set. Merging the PR is the only way anything ships: the
+  repository's `release.yml` tags the version and runs GoReleaser, which
+  updates the Homebrew tap. Agents cannot edit `VERSION`, `CHANGELOG.md`
+  or release workflows, and release PRs never merge on their own.
+
 [SECURITY.md](SECURITY.md) is the trust model: what is a boundary, what is
 only a heuristic, and the gaps that remain until runs are isolated.
 

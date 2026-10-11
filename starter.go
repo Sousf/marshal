@@ -110,6 +110,13 @@ jobs:
     schedule: on-failure
     class: code
     max_usd: 5.00
+  # Deterministic, no agent: keeps one "Release vX.Y.Z" PR open per repo
+  # with the version bumped and the notes written. Needs a release workflow
+  # that tags VERSION when it changes on the default branch.
+  - name: release
+    description: prepare the next release as a pull request
+    schedule: daily
+    class: release
   - name: reflect
     description: update the operator profile and skills from the week's reviewer feedback
     schedule: daily
@@ -123,7 +130,8 @@ policy:
     hardening:  {start: review, promote: 3, demote_on_reject: 1, demote_on_revert: 2, soak_hours: 24}
     dependency: {start: review, promote: 3, demote_on_reject: 1, demote_on_revert: 2, soak_hours: 24}
     code:       {start: review, promote: 5, demote_on_reject: 1, demote_on_revert: 2, soak_hours: 48}
-    release:    {start: locked}
+    # Release PRs: prepared by MARSHAL without an agent, merged only by you.
+    release:    {start: review, promote: 0}
     # Memory: skills and the operator profile. promote 0 means it never
     # merges on its own, however many you approve.
     memory:     {start: review, promote: 0}
