@@ -31,6 +31,9 @@ func TestCheck(t *testing.T) {
 	if v := Check(config.Job{}, []Change{{Path: "anything/at/all.go"}}); len(v) != 0 {
 		t.Errorf("job with no paths should allow anything unlocked: %v", v)
 	}
+	if v := Check(job, []Change{{Path: "AGENTS.md", Added: 2}}); len(v) != 0 {
+		t.Errorf("AGENTS.md is allowed for every job: %v", v)
+	}
 }
 
 func TestMatch(t *testing.T) {

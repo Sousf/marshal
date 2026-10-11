@@ -789,6 +789,12 @@ func cmdShow(ctx context.Context, args []string) error {
 	if r.Error != "" {
 		fmt.Printf("  error: %s\n", indent(r.Error, "         "))
 	}
+	if r.Parent != "" {
+		fmt.Printf("  follow-up of run %s\n", r.Parent)
+	}
+	if r.Feedback != "" {
+		fmt.Printf("  reviewer: %s\n", indent(r.Feedback, "            "))
+	}
 	if v, ok, _ := st.LatestVerdict(ctx, r.ID); ok {
 		head := v.Head
 		if len(head) > 8 {

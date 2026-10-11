@@ -46,7 +46,7 @@ const Schema = `{
         "additionalProperties": false,
         "required": ["category", "severity", "detail"],
         "properties": {
-          "category": {"type": "string", "enum": ["scope", "safety", "injection", "verification", "other"]},
+          "category": {"type": "string", "enum": ["scope", "safety", "injection", "verification", "memory", "other"]},
           "severity": {"type": "string", "enum": ["high", "medium", "low"]},
           "detail": {"type": "string"}
         }

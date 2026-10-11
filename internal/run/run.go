@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -128,8 +129,12 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 		defer logf("note", "work tree kept at %s", ws.Dir)
 	}
 
+	prompt := brief
+	if h := History(ctx, x.Store, repo.Name, job.Name); h != "" {
+		prompt += "\n" + h
+	}
 	req := runner.Request{
-		Prompt:          brief + jobs.Contract,
+		Prompt:          prompt + jobs.Contract,
 		SystemPrompt:    systemPrompt(repo, ws.Conventions()),
 		Dir:             ws.Dir,
 		Model:           res.Model,
@@ -155,6 +160,10 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	}
 	if result.IsError {
 		return finish(store.Failed, "agent: "+firstLine(result.Output))
+	}
+	if n := x.recordLessons(ws, result.Output, logf); n > 0 {
+		rec.Summary, _ = ParseLessons(result.Output)
+		rec.Summary = result.Output // keep the lessons visible in the report
 	}
 
 	changed, err := ws.Changed(ctx)
@@ -208,6 +217,13 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 // new one, with the failing logs in the brief and a PR comment instead of a
 // new PR. The parent's job sets the path rules the fix must stay inside.
 func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR, logs string, opts Options) (store.Run, error) {
+	return x.FollowupKind(ctx, "fix-checks", parent, pr, logs, opts)
+}
+
+// FollowupKind is Followup with the brief chosen: "fix-checks" takes the
+// failing logs as context, "address-review" the reviewer's comments.
+func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.Run, pr github.PR, extra string, opts Options) (store.Run, error) {
+	logs := extra
 	job, ok := x.Fleet.Job(parent.Job)
 	if !ok {
 		return store.Run{}, fmt.Errorf("unknown job %q", parent.Job)
@@ -217,7 +233,10 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 		return store.Run{}, fmt.Errorf("unknown repo %q", parent.Repo)
 	}
 	res := x.Fleet.Resolve(job)
-	brief, _ := jobs.Prompt("fix-checks")
+	brief, ok := jobs.Prompt(kind)
+	if !ok {
+		return store.Run{}, fmt.Errorf("no brief for follow-up kind %q", kind)
+	}
 	if !x.Adapter.Available() {
 		return store.Run{}, fmt.Errorf("adapter %s is not available on this host", x.Adapter.Name())
 	}
@@ -225,7 +244,7 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 	if branch == "" {
 		branch = parent.Branch
 	}
-	rec := &store.Run{ID: opts.ID, Job: "fix-checks", Repo: repo.Name, Class: job.Class, Adapter: x.Adapter.Name(), Model: res.Model,
+	rec := &store.Run{ID: opts.ID, Job: kind, Repo: repo.Name, Class: job.Class, Adapter: x.Adapter.Name(), Model: res.Model,
 		Branch: branch, Parent: parent.ID, BaseHead: pr.HeadSHA}
 	if err := x.Store.CreateRun(ctx, rec); err != nil {
 		return store.Run{}, err
@@ -241,7 +260,7 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 		}
 		return *rec, nil
 	}
-	logf("note", "run %s: fixing checks on %s (parent %s, head %s)", rec.ID, parent.PRURL, parent.ID, short(pr.HeadSHA))
+	logf("note", "run %s: %s on %s (parent %s, head %s)", rec.ID, kind, parent.PRURL, parent.ID, short(pr.HeadSHA))
 
 	harnessEnv, agentEnv := opts.Env, opts.Env
 	identity := res.Identity
@@ -270,10 +289,15 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 	var b strings.Builder
 	b.WriteString(brief)
 	fmt.Fprintf(&b, "\n## The pull request\n\n%s\n\nOriginal job `%s`: %s\n\nTitle: %s\n\n<pr-body>\n%s\n</pr-body>\n", parent.PRURL, job.Name, job.Description, pr.Title, strings.TrimSpace(pr.Body))
-	if strings.TrimSpace(logs) == "" {
-		b.WriteString("\n## Failing checks\n\nNo failed-step log was available; use `gh run list` and `gh run view --log-failed` to find it.\n")
-	} else {
-		b.WriteString("\n## Failing checks\n\n" + logs + "\n")
+	switch kind {
+	case "address-review":
+		b.WriteString("\n## The reviewer's comments\n\n" + strings.TrimSpace(logs) + "\n")
+	default:
+		if strings.TrimSpace(logs) == "" {
+			b.WriteString("\n## Failing checks\n\nNo failed-step log was available; use `gh run list` and `gh run view --log-failed` to find it.\n")
+		} else {
+			b.WriteString("\n## Failing checks\n\n" + logs + "\n")
+		}
 	}
 	b.WriteString(jobs.Contract)
 
@@ -303,6 +327,7 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 	if result.IsError {
 		return finish(store.Failed, "agent: "+firstLine(result.Output))
 	}
+	x.recordLessons(ws, result.Output, logf)
 	changed, err := ws.Changed(ctx)
 	if err != nil {
 		return finish(store.Failed, err.Error())
@@ -324,7 +349,7 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 		}
 		return finish(store.Blocked, strings.TrimSpace(vb.String()))
 	}
-	title, body := splitReport(result.Output, "fix-checks")
+	title, body := splitReport(result.Output, kind)
 	if err := ws.Commit(ctx, title+"\n\n"+body+trailer(rec, result)); err != nil {
 		return finish(store.Failed, err.Error())
 	}
@@ -337,6 +362,27 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 	}
 	logf("note", "pushed fix to %s", ws.Branch)
 	return finish(store.Pushed, "")
+}
+
+// recordLessons writes the report's lessons into the work tree's AGENTS.md
+// so they ride in the same commit. Returns how many were new.
+func (x *Executor) recordLessons(ws *workspace.Workspace, report string, logf func(kind, format string, args ...any)) int {
+	_, lessons := ParseLessons(report)
+	if len(lessons) == 0 {
+		return 0
+	}
+	path := filepath.Join(ws.Dir, "AGENTS.md")
+	cur, _ := os.ReadFile(path)
+	merged, added := MergeLessons(string(cur), lessons)
+	if added == 0 {
+		return 0
+	}
+	if err := os.WriteFile(path, []byte(merged), 0o644); err != nil {
+		logf("note", "could not record lessons: %v", err)
+		return 0
+	}
+	logf("note", "recorded %d lesson(s) in AGENTS.md", added)
+	return added
 }
 
 func short(sha string) string {

@@ -45,8 +45,22 @@ Working today:
   go.mod or a changed workflow action fails the verdict on their own. The
   verdict is bound to the head SHA, so a new push re-verifies.
 
-Not yet: post-merge revert watch, memory-as-PR, adapters for agents other
-than Claude Code.
+- Red checks on a MARSHAL PR start a follow-up run on the same branch with
+  the failing logs; a reviewer's "changes requested" starts one with the
+  comments. The fix is pushed to the PR and answered in a comment. Each
+  failing head is attempted once, a few attempts per PR
+  (`caps.check_fix_attempts`), then the PR is labelled for a human.
+- Learning. A run may end its report with `## Lessons`: facts about the
+  repository a future run needs. MARSHAL appends them to the repo's
+  `AGENTS.md` in the same commit, so they arrive in the same PR, under the
+  same review and the same verifier, and are loaded into every later run.
+  The verifier treats an AGENTS.md line that reads as an instruction rather
+  than a fact as a high finding. Separately, the last few outcomes of a job
+  on a repo, including what a reviewer said when closing one, go into the
+  next brief as history.
+
+Not yet: post-merge revert watch, adapters for agents other than Claude
+Code.
 
 ## Run it yourself
 

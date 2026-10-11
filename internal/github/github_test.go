@@ -2,7 +2,9 @@ package github
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestSlug(t *testing.T) {
@@ -42,6 +44,30 @@ func TestRollup(t *testing.T) {
 		if got := rollup(j); got != want {
 			t.Errorf("rollup(%s) = %q want %q", in, got, want)
 		}
+	}
+}
+
+func TestFilterComments(t *testing.T) {
+	var pc prCommentsJSON
+	json.Unmarshal([]byte(`{"comments":[
+		{"author":{"login":"pete"},"body":"please pin this","createdAt":"2026-10-11T10:00:00Z"},
+		{"author":{"login":"marshal-sousf[bot]"},"body":"MARSHAL pushed a fix","createdAt":"2026-10-11T10:05:00Z"},
+		{"author":{"login":"pete"},"body":"old","createdAt":"2026-10-10T10:00:00Z"}],
+		"reviews":[{"author":{"login":"pete"},"body":"needs tests","state":"CHANGES_REQUESTED","submittedAt":"2026-10-11T09:00:00Z"},
+		{"author":{"login":"pete"},"body":"","state":"COMMENTED","submittedAt":"2026-10-11T09:30:00Z"}]}`), &pc)
+	inline := []inlineJSON{{Body: "rename this", Path: "main.go", CreatedAt: time.Date(2026, 10, 11, 9, 45, 0, 0, time.UTC)}}
+	inline[0].User.Login = "pete"
+	since := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
+	got := filterComments(pc, inline, "marshal-sousf[bot]", since)
+	if len(got) != 3 {
+		t.Fatalf("got %d comments: %+v", len(got), got)
+	}
+	if got[0].Body != "needs tests" || got[1].Where != "main.go" || got[2].Body != "please pin this" {
+		t.Errorf("order or content wrong: %+v", got)
+	}
+	r := RenderComments(got)
+	if !strings.Contains(r, "pete (review changes_requested") || !strings.Contains(r, "main.go") {
+		t.Errorf("render:\n%s", r)
 	}
 }
 

@@ -60,6 +60,9 @@ type Run struct {
 	// the same failing head is never attempted twice.
 	Parent   string
 	BaseHead string
+	// Feedback is what humans said on the PR, captured when it closed, and
+	// fed into later briefs for the same job.
+	Feedback string
 	// Summary is the agent's final report; the PR body.
 	Summary string
 	// Error explains Failed or Blocked.
@@ -193,6 +196,7 @@ func (s *Store) migrate() error {
 		`ALTER TABLE runs ADD COLUMN merged_by TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN parent TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN base_head TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE runs ADD COLUMN feedback TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -236,8 +240,8 @@ func (s *Store) UpdateRun(ctx context.Context, r *Run) error {
 		fin = r.FinishedAt.Unix()
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=?, turns=?,
-		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=? WHERE id=?`,
-		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.ID)
+		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=?, feedback=? WHERE id=?`,
+		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.Feedback, r.ID)
 	if err != nil {
 		return err
 	}
@@ -261,14 +265,14 @@ func (s *Store) AppendEvent(ctx context.Context, runID string, e Event) error {
 var ErrNotFound = errors.New("not found")
 
 const runCols = `id, job, repo, class, adapter, model, status, started_at, finished_at,
-	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head`
+	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head, feedback`
 
 func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var r Run
 	var started int64
 	var finished sql.NullInt64
 	err := sc.Scan(&r.ID, &r.Job, &r.Repo, &r.Class, &r.Adapter, &r.Model, &r.Status,
-		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead)
+		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead, &r.Feedback)
 	if err != nil {
 		return r, err
 	}
@@ -349,6 +353,26 @@ func (s *Store) ListByStatus(ctx context.Context, statuses ...Status) ([]Run, er
 	}
 	q += `) ORDER BY started_at`
 	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Run
+	for rows.Next() {
+		r, err := scanRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// ListByRepoJob returns the latest runs of one job on one repo, newest
+// first, excluding follow-ups.
+func (s *Store) ListByRepoJob(ctx context.Context, repo, job string, limit int) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+runCols+` FROM runs WHERE repo=? AND job=? AND parent=''
+		ORDER BY started_at DESC, rowid DESC LIMIT ?`, repo, job, limit)
 	if err != nil {
 		return nil, err
 	}

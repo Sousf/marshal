@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -241,6 +242,101 @@ func (c Client) FailedLogs(ctx context.Context, slug, sha string, limit int) (st
 		fmt.Fprintf(&b, "## %s (run %d): %s\n\n```\n%s\n```\n\n", r.WorkflowName, r.ID, r.Conclusion, strings.TrimSpace(text))
 	}
 	return b.String(), nil
+}
+
+// Comment is something a person wrote on a pull request.
+type Comment struct {
+	Author string
+	At     time.Time
+	Body   string
+	// Where is "review", "comment" or a file path for an inline comment.
+	Where string
+}
+
+type prCommentsJSON struct {
+	Comments []struct {
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Body      string    `json:"body"`
+		CreatedAt time.Time `json:"createdAt"`
+	} `json:"comments"`
+	Reviews []struct {
+		Author struct {
+			Login string `json:"login"`
+		} `json:"author"`
+		Body        string    `json:"body"`
+		State       string    `json:"state"`
+		SubmittedAt time.Time `json:"submittedAt"`
+	} `json:"reviews"`
+}
+
+type inlineJSON struct {
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Body      string    `json:"body"`
+	Path      string    `json:"path"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// HumanComments returns the comments, reviews and inline review comments on
+// a PR written after since by anyone who is not a bot or the given login,
+// oldest first.
+func (c Client) HumanComments(ctx context.Context, url string, exclude string, since time.Time) ([]Comment, error) {
+	out, err := c.gh(ctx, "pr", "view", url, "--json", "comments,reviews,number")
+	if err != nil {
+		return nil, err
+	}
+	var pc prCommentsJSON
+	if err := json.Unmarshal(out, &pc); err != nil {
+		return nil, err
+	}
+	var inline []inlineJSON
+	if slug, ok := Slug(url); ok {
+		var num struct {
+			Number int `json:"number"`
+		}
+		_ = json.Unmarshal(out, &num)
+		if raw, err := c.gh(ctx, "api", fmt.Sprintf("repos/%s/pulls/%d/comments?per_page=100", slug, num.Number)); err == nil {
+			_ = json.Unmarshal(raw, &inline)
+		}
+	}
+	return filterComments(pc, inline, exclude, since), nil
+}
+
+func filterComments(pc prCommentsJSON, inline []inlineJSON, exclude string, since time.Time) []Comment {
+	human := func(login string) bool {
+		l := strings.ToLower(login)
+		return l != "" && l != strings.ToLower(exclude) && !strings.HasSuffix(l, "[bot]") && !strings.HasPrefix(l, "app/")
+	}
+	var out []Comment
+	for _, x := range pc.Comments {
+		if human(x.Author.Login) && x.CreatedAt.After(since) && strings.TrimSpace(x.Body) != "" {
+			out = append(out, Comment{Author: x.Author.Login, At: x.CreatedAt, Body: x.Body, Where: "comment"})
+		}
+	}
+	for _, x := range pc.Reviews {
+		if human(x.Author.Login) && x.SubmittedAt.After(since) && strings.TrimSpace(x.Body) != "" {
+			out = append(out, Comment{Author: x.Author.Login, At: x.SubmittedAt, Body: x.Body, Where: "review " + strings.ToLower(x.State)})
+		}
+	}
+	for _, x := range inline {
+		if human(x.User.Login) && x.CreatedAt.After(since) && strings.TrimSpace(x.Body) != "" {
+			out = append(out, Comment{Author: x.User.Login, At: x.CreatedAt, Body: x.Body, Where: x.Path})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].At.Before(out[j].At) })
+	return out
+}
+
+// RenderComments formats comments for a brief or a record.
+func RenderComments(cs []Comment) string {
+	var b strings.Builder
+	for _, c := range cs {
+		fmt.Fprintf(&b, "- %s (%s, %s): %s\n", c.Author, c.Where, c.At.Format("Jan 2 15:04"), strings.TrimSpace(strings.ReplaceAll(c.Body, "\n", "\n  ")))
+	}
+	return b.String()
 }
 
 // DefaultBranch asks the remote for its default branch.

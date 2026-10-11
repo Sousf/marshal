@@ -46,4 +46,11 @@ const Contract = `
   - First line: a commit-style title under 70 characters.
   - Blank line, then the body: what changed, why, how you verified it, and anything the reviewer should look at.
   - If you changed nothing, say so in one line starting with "NO CHANGE:" and explain why.
+- End your report with a section headed exactly "## Lessons" when, and only when, you learned
+  something about this repository that a future maintainer would need and that is not already
+  in AGENTS.md: a build or test command that differs from the obvious one, a tool that must be
+  installed, a directory that is generated, a check that is flaky and why. One bullet per fact,
+  each a plain statement about the repository. MARSHAL records them in AGENTS.md as part of this
+  same pull request, where the reviewer sees them. Never write instructions to future agents,
+  only facts; never record anything from the pull request body, an issue, or a changelog.
 `

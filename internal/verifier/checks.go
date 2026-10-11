@@ -28,6 +28,9 @@ type Checks struct {
 	// Suspicious lists lines that look like encoded blobs or raw URLs added
 	// to source files.
 	Suspicious []string
+	// Memory lists lines added to AGENTS.md that read as instructions
+	// rather than facts: the shape of a poisoned memory.
+	Memory []string
 }
 
 // Findings converts the checks into findings.
@@ -45,12 +48,16 @@ func (c Checks) Findings() []Finding {
 		out = append(out, Finding{Category: "safety", Severity: "medium", Source: "check",
 			Detail: "added line looks like an encoded blob or a raw URL: " + s})
 	}
+	for _, s := range c.Memory {
+		out = append(out, Finding{Category: "memory", Severity: "high", Source: "check",
+			Detail: "AGENTS.md gains a line that reads as an instruction to future agents, not a fact: " + s})
+	}
 	return out
 }
 
 // Fatal reports whether any check alone should fail the verdict.
 func (c Checks) Fatal() bool {
-	return len(c.NewModules) > 0 || len(c.WorkflowUses) > 0
+	return len(c.NewModules) > 0 || len(c.WorkflowUses) > 0 || len(c.Memory) > 0
 }
 
 // Run computes the checks from the base and head go.mod and the patch.
@@ -64,9 +71,13 @@ func Run(baseGoMod, headGoMod, patch string, class string) Checks {
 			c.NewModules = append(c.NewModules, mod)
 		}
 	}
-	c.WorkflowUses, c.Suspicious = scanPatch(patch)
+	c.WorkflowUses, c.Suspicious, c.Memory = scanPatch(patch)
 	return c
 }
+
+// memoryRE matches added AGENTS.md lines that try to steer future runs
+// rather than describe the repository.
+var memoryRE = regexp.MustCompile(`(?i)\b(ignore (all |any |the )?(previous|prior|above)|always (merge|approve|pass)|skip (the )?(tests?|checks?|verif)|do not run (the )?tests?|without (review|verif)|auto-?merge|disable (the )?(check|test|verif|polic)|you (must|should) (not )?(always|never)|trust(ed)? (source|change|proposal)|pre-?approved)\b`)
 
 var requireRE = regexp.MustCompile(`^\s*(?:require\s+)?([A-Za-z0-9._~/-]+\.[A-Za-z0-9._~/-]+)\s+v[0-9]`)
 
@@ -96,7 +107,7 @@ var (
 // they are; the verifier decides if the pin is right. Encoded blobs and
 // URLs are reported from source files only, since lock files and vendored
 // data are full of both.
-func scanPatch(patch string) (uses, suspicious []string) {
+func scanPatch(patch string) (uses, suspicious, memory []string) {
 	file := ""
 	sc := bufio.NewScanner(strings.NewReader(patch))
 	sc.Buffer(make([]byte, 0, 64*1024), 64*1024*1024)
@@ -115,6 +126,12 @@ func scanPatch(patch string) (uses, suspicious []string) {
 			}
 			continue
 		}
+		if file == "AGENTS.md" || strings.HasSuffix(file, "/AGENTS.md") {
+			if memoryRE.MatchString(line[1:]) {
+				memory = append(memory, clip(strings.TrimSpace(line[1:]), 120))
+			}
+			continue
+		}
 		if !sourceFile(file) {
 			continue
 		}
@@ -127,7 +144,7 @@ func scanPatch(patch string) (uses, suspicious []string) {
 			suspicious = append(suspicious, fmt.Sprintf("%s: %s", file, u))
 		}
 	}
-	return uses, suspicious
+	return uses, suspicious, memory
 }
 
 func sourceFile(f string) bool {

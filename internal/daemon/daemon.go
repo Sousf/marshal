@@ -34,6 +34,7 @@ type GitHub interface {
 	LatestCI(ctx context.Context, slug, branch string) (github.CI, bool, error)
 	DefaultBranch(ctx context.Context, slug string) (string, error)
 	FailedLogs(ctx context.Context, slug, sha string, limit int) (string, error)
+	HumanComments(ctx context.Context, url, exclude string, since time.Time) ([]github.Comment, error)
 }
 
 // Daemon holds the loop's state.
@@ -184,6 +185,7 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			if r.MergedBy == "" {
 				r.MergedBy = "human"
 			}
+			r.Feedback = d.feedback(ctx, r)
 			d.note(ctx, r.ID, "merged by %s", r.MergedBy)
 			if r.MergedBy == "human" {
 				d.move(ctx, ladder, repo, r.Class, policy.Approved)
@@ -191,6 +193,7 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 		case pr.Closed():
 			r.Status = store.Rejected
 			r.FinishedAt = d.now()
+			r.Feedback = d.feedback(ctx, r)
 			d.note(ctx, r.ID, "closed without merging")
 			d.move(ctx, ladder, repo, r.Class, policy.Rejected)
 		default:
@@ -198,6 +201,11 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			// cap. Nothing else happens to the PR while it is red.
 			if pr.Checks == "FAILURE" {
 				d.fixChecks(ctx, repo, r, pr)
+				continue
+			}
+			// A human asked for changes: address them, within the same cap.
+			if pr.Review == "CHANGES_REQUESTED" {
+				d.addressReview(ctx, repo, r, pr)
 				continue
 			}
 			by, reason := "", ""
@@ -294,6 +302,98 @@ func (d *Daemon) mayMerge(ctx context.Context, ladder policy.Ladder, repo config
 		return "soak", ""
 	}
 	return "auto", ""
+}
+
+// feedback collects what humans said on a proposal, for the record and for
+// the next brief of the same job.
+func (d *Daemon) feedback(ctx context.Context, r store.Run) string {
+	cs, err := d.GH.HumanComments(ctx, r.PRURL, d.botLogin(), time.Time{})
+	if err != nil {
+		d.fail("run %s: comments: %v", r.ID, err)
+		return ""
+	}
+	return strings.TrimSpace(github.RenderComments(cs))
+}
+
+func (d *Daemon) botLogin() string {
+	if d.Auth != nil {
+		return d.Auth.Identity().Name
+	}
+	return ""
+}
+
+// addressReview starts a follow-up that acts on a reviewer's comments. Only
+// comments newer than the last follow-up count, so the same request is not
+// answered twice, and the per-PR cap is shared with check fixes.
+func (d *Daemon) addressReview(ctx context.Context, repo config.Repo, r store.Run, pr github.PR) {
+	cap := d.Fleet.Policy.Caps.FixAttempts()
+	if cap == 0 || d.busy(repo.Name) {
+		return
+	}
+	prior, err := d.Store.Followups(ctx, r.ID)
+	if err != nil {
+		d.fail("run %s: followups: %v", r.ID, err)
+		return
+	}
+	since := r.StartedAt
+	attempts := 0
+	for _, f := range prior {
+		if f.Status == store.Running {
+			return
+		}
+		attempts++
+		if f.StartedAt.After(since) {
+			since = f.StartedAt
+		}
+	}
+	cs, err := d.GH.HumanComments(ctx, r.PRURL, d.botLogin(), since)
+	if err != nil {
+		d.fail("run %s: comments: %v", r.ID, err)
+		return
+	}
+	if len(cs) == 0 {
+		return // nothing new since the last follow-up; the ball is with the human
+	}
+	if attempts >= cap {
+		if !pr.HasLabel("marshal:needs-human") {
+			d.note(ctx, r.ID, "review feedback after %d follow-up(s); handing to a human", attempts)
+			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("MARSHAL has made %d follow-up(s) on this pull request and stopped at the cap. The remaining feedback needs a human.", attempts))
+			_ = d.GH.AddLabel(ctx, r.PRURL, "marshal:needs-human")
+		}
+		return
+	}
+	d.mu.Lock()
+	id := store.NewID()
+	d.running[repo.Name] = id
+	d.mu.Unlock()
+	d.note(ctx, r.ID, "changes requested; starting follow-up %s to address %d comment(s)", id, len(cs))
+	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
+	comments := github.RenderComments(cs)
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			delete(d.running, repo.Name)
+			d.mu.Unlock()
+		}()
+		rec, err := x.FollowupKind(d.base, "address-review", r, pr, comments, run.Options{ID: id})
+		if err != nil {
+			d.fail("run %s: %v", id, err)
+			return
+		}
+		d.Log.Printf("run %s: %s (review follow-up for %s)", id, rec.Status, r.ID)
+		switch rec.Status {
+		case store.Pushed:
+			_ = d.GH.CommentPR(d.base, r.PRURL, "MARSHAL addressed the review (run `"+id+"`).\n\n"+rec.Summary)
+		case store.NoChange:
+			_ = d.GH.CommentPR(d.base, r.PRURL, "MARSHAL read the review and made no change (run `"+id+"`).\n\n"+rec.Summary)
+		case store.Failed, store.Blocked:
+			msg := rec.Error
+			if msg == "" {
+				msg = rec.Summary
+			}
+			_ = d.GH.CommentPR(d.base, r.PRURL, fmt.Sprintf("MARSHAL could not address the review (run `%s`, %s).\n\n%s", id, rec.Status, msg))
+		}
+	}()
 }
 
 // fixChecks starts a follow-up run that pushes a fix to a red proposal.

@@ -52,6 +52,11 @@ var alwaysLocked = []string{
 	".marshal/**",
 }
 
+// alwaysAllowed may be touched by any job whatever its path list: the
+// conventions file is where MARSHAL records what it learned, in the same
+// pull request as the change that taught it.
+var alwaysAllowed = []string{"AGENTS.md"}
+
 // Check returns every violation in the diff. An empty result means the diff
 // may be committed.
 func Check(job config.Job, changes []Change) []Violation {
@@ -61,6 +66,9 @@ func Check(job config.Job, changes []Change) []Violation {
 		total += c.Added + c.Removed
 		if m := matchAny(alwaysLocked, c.Path); m != "" {
 			out = append(out, Violation{Rule: "locked", Path: c.Path, Text: "matches always-locked pattern " + m})
+			continue
+		}
+		if matchAny(alwaysAllowed, c.Path) != "" {
 			continue
 		}
 		if len(job.Paths) > 0 && matchAny(job.Paths, c.Path) == "" {

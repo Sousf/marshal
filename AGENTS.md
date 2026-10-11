@@ -25,6 +25,10 @@ Rules the code enforces, which no change may weaken:
 - Auto-merge requires CI checks to exist and pass. A repo without CI gets no
   autonomy, whatever its level.
 - The daemon listens on a Unix socket only.
+- Memory goes through review: lessons land in AGENTS.md inside the same
+  commit as the change, never anywhere else, and `run.ParseLessons` only
+  accepts plain bullets. Run history fed to briefs is data the harness
+  already holds, labelled as not instructions.
 - No autonomous merge without a PASS verdict bound to the PR's current head.
   The verifier gets read-only tools and never the proposer's transcript.
   `verifier.Checks.Fatal` outranks the model's answer.

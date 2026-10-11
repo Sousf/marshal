@@ -320,6 +320,12 @@ func (m Model) renderDetail() string {
 			b.WriteString("          " + strings.ReplaceAll(v.Summary, "\n", "\n          ") + "\n")
 		}
 	}
+	if r.Feedback != "" {
+		b.WriteString(" " + sDim.Render("reviewer") + "\n          " + strings.ReplaceAll(r.Feedback, "\n", "\n          ") + "\n")
+	}
+	if r.Parent != "" {
+		b.WriteString(" " + sDim.Render("follow-up of run "+r.Parent) + "\n")
+	}
 	b.WriteString(" " + sRule.Render(strings.Repeat("─", max(m.width-4, 10))) + "\n")
 	for _, e := range m.events {
 		var kind string

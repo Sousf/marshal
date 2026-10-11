@@ -26,6 +26,8 @@ type fakeGH struct {
 	comments []string
 	labels   []string
 	ci       github.CI
+	// humanComments is what HumanComments returns per PR url.
+	humanComments map[string][]github.Comment
 }
 
 func (g *fakeGH) ViewPR(_ context.Context, url string) (github.PR, error) {
@@ -62,6 +64,17 @@ func (g *fakeGH) LatestCI(context.Context, string, string) (github.CI, bool, err
 	return g.ci, true, nil
 }
 func (g *fakeGH) DefaultBranch(context.Context, string) (string, error) { return "main", nil }
+func (g *fakeGH) HumanComments(_ context.Context, url, _ string, since time.Time) ([]github.Comment, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	var out []github.Comment
+	for _, c := range g.humanComments[url] {
+		if c.At.After(since) {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
 func (g *fakeGH) FailedLogs(context.Context, string, string, int) (string, error) {
 	return "## ci (run 1): failure\n\n```\nFAIL: TestX\n```\n", nil
 }
@@ -90,7 +103,7 @@ func (f *fakeAdapter) Run(_ context.Context, req runner.Request, emit func(runne
 	}
 	f.calls++
 	f.prompts = append(f.prompts, req.Prompt)
-	if f.fix != nil && strings.Contains(req.Prompt, "Fix failing checks") {
+	if f.fix != nil && (strings.Contains(req.Prompt, "Fix failing checks") || strings.Contains(req.Prompt, "Address review feedback")) {
 		f.fix(req.Dir)
 		return runner.Result{Output: "Fix the test\n\nCorrected the assertion.", Turns: 2, CostUSD: 0.02}, nil
 	}
@@ -452,6 +465,52 @@ func TestRedChecksGetFixedWithinCap(t *testing.T) {
 	}
 	if v, ok, _ := d.Store.LatestVerdict(ctx, r.ID); ok {
 		t.Errorf("no verification while red: %+v", v)
+	}
+}
+
+func TestReviewFeedbackIsAddressedAndRecorded(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "SUCCESS", Review: "CHANGES_REQUESTED", Title: "T", Body: "B"}}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.fix = func(wd string) { os.WriteFile(filepath.Join(wd, "addressed.txt"), []byte("ok\n"), 0o644) }
+	r := proposalIn(t, d, gh, dir, "hardening", "u", time.Now().Add(-time.Hour))
+	gh.humanComments = map[string][]github.Comment{"u": {{Author: "pete", At: time.Now().Add(-time.Minute), Body: "please rename the flag", Where: "main.go"}}}
+
+	settle(t, d)
+	wait(t, d)
+	fu, _ := d.Store.Followups(ctx, r.ID)
+	if len(fu) != 1 || fu[0].Job != "address-review" || fu[0].Status != store.Pushed {
+		t.Fatalf("followups = %+v", fu)
+	}
+	if !strings.Contains(strings.Join(a.prompts, "\n"), "please rename the flag") {
+		t.Error("the review comment should be in the brief")
+	}
+	// No new comments since the follow-up: nothing more happens.
+	settle(t, d)
+	wait(t, d)
+	if fu, _ := d.Store.Followups(ctx, r.ID); len(fu) != 1 {
+		t.Error("the same comments must not be addressed twice")
+	}
+	// The human closes it: feedback is captured on the record.
+	gh.mu.Lock()
+	p := gh.prs["u"]
+	p.State = "CLOSED"
+	gh.prs["u"] = p
+	gh.humanComments["u"] = append(gh.humanComments["u"], github.Comment{Author: "pete", At: time.Now(), Body: "not this way", Where: "comment"})
+	gh.mu.Unlock()
+	settle(t, d)
+	got, _ := d.Store.GetRun(ctx, r.ID)
+	if got.Status != store.Rejected || !strings.Contains(got.Feedback, "not this way") || !strings.Contains(got.Feedback, "please rename the flag") {
+		t.Errorf("feedback not recorded: %+v", got)
+	}
+	// And it shows up in the next brief for the same job.
+	a.prompts = nil
+	if _, err := d.Trigger(ctx, "audit", "x"); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, d)
+	if !strings.Contains(strings.Join(a.prompts, "\n"), "not this way") {
+		t.Error("history with reviewer feedback should reach the next run of the job")
 	}
 }
 
