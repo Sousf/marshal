@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.2 (2026-10-11)
+
+- O opens every pull request waiting on you
+
 ## v0.1.1 (2026-10-11)
 
 - brew-setup can be triggered on its own (#6)
