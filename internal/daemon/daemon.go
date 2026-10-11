@@ -957,6 +957,13 @@ func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
 			d.note(bg, r.ID, "verifier deferred: %v", err)
 			return
 		}
+		if err != nil && res.Turns == 0 && res.CostUSD == 0 {
+			// The harness failed before the agent ran, so nothing was paid
+			// for and nothing was judged. An UNSURE here would stick to the
+			// head; retry on a later tick instead.
+			d.fail("run %s: verifier did not start: %v", r.ID, err)
+			return
+		}
 		if err != nil {
 			d.fail("run %s: verify: %v", r.ID, err)
 			res.RunID = r.ID

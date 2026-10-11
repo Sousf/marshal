@@ -237,3 +237,18 @@ func TestVerifyNoAnswerIsUnsure(t *testing.T) {
 		t.Errorf("%+v", res.Verdict)
 	}
 }
+
+// The daemon builds its verifier without a work root; checkouts then go to
+// the state directory, as runs do.
+func TestVerifyDefaultsWorkRoot(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("MARSHAL_STATE", state)
+	url, sha := origin(t)
+	v := &Verifier{Fleet: fleet(t, url), Adapter: &scripted{noAnswer: true}}
+	if _, err := v.Verify(context.Background(), store.Run{ID: "r1", Job: "audit", Repo: "x"}, github.PR{HeadRef: "marshal/audit/r1", HeadSHA: sha}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(state, "work")); err != nil {
+		t.Errorf("checkout not under the state directory: %v", err)
+	}
+}

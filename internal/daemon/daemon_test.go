@@ -1022,3 +1022,18 @@ func mustRun(t *testing.T, d *Daemon) store.Run {
 	}
 	return runs[0]
 }
+
+func TestUnstartedVerifyRecordsNoVerdict(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"nobranch": {State: "OPEN", Checks: "SUCCESS", HeadSHA: "deadbeef"}}}
+	d, _ := newDaemon(t, gh)
+	r := proposal(t, d, "hardening", "nobranch", time.Now()) // no branch in the origin: checkout fails
+	d.startVerify(ctx, r, gh.prs["nobranch"])
+	waitVerify(t, d)
+	if v, ok, _ := d.Store.LatestVerdict(ctx, r.ID); ok {
+		t.Errorf("a verification that never started left a verdict: %+v", v)
+	}
+	if len(gh.labels) != 0 || len(gh.comments) != 0 {
+		t.Errorf("nothing should be posted: labels=%v comments=%v", gh.labels, gh.comments)
+	}
+}

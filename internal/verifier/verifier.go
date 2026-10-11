@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -79,7 +80,8 @@ type Result struct {
 type Verifier struct {
 	Fleet   *config.Fleet
 	Adapter runner.Adapter
-	// WorkRoot is where checkouts are made.
+	// WorkRoot is where checkouts are made. Empty means the state
+	// directory's, as for runs.
 	WorkRoot string
 	// Log receives one line per event. May be nil.
 	Log io.Writer
@@ -132,7 +134,11 @@ func (v *Verifier) Verify(ctx context.Context, run store.Run, pr github.PR) (Res
 		repo.URL = ghapp.CloneURL(repo)
 	}
 	v.logf("verify %s: checking out %s @ %s", run.ID, headRef, short(pr.HeadSHA))
-	ws, err := workspace.PrepareHead(ctx, v.WorkRoot, repo, run.ID, headRef, pr.HeadSHA, env)
+	root := v.WorkRoot
+	if root == "" {
+		root = filepath.Join(config.StateDir(), "work")
+	}
+	ws, err := workspace.PrepareHead(ctx, root, repo, run.ID, headRef, pr.HeadSHA, env)
 	if err != nil {
 		return Result{}, err
 	}
