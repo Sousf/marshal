@@ -317,3 +317,16 @@ func TestListRender(t *testing.T) {
 		t.Error("fit pads and truncates")
 	}
 }
+
+func TestOpenPRURLs(t *testing.T) {
+	runs := []store.Run{ // newest first, as the source returns them
+		{ID: "5", Status: store.Proposed, PRURL: "https://x/pull/3"},
+		{ID: "4", Status: store.Merged, PRURL: "https://x/pull/2"},
+		{ID: "3", Status: store.Proposed, PRURL: "https://x/pull/1"}, // updated release: same URL twice
+		{ID: "2", Status: store.Proposed, PRURL: "https://x/pull/1"},
+		{ID: "1", Status: store.Proposed},
+	}
+	if got := strings.Join(openPRURLs(runs), " "); got != "https://x/pull/1 https://x/pull/3" {
+		t.Errorf("urls = %q", got)
+	}
+}

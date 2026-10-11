@@ -485,6 +485,14 @@ func (m Model) key(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "R":
 		m.setFlash("refreshing")
 		return m, m.refresh()
+	case "O":
+		urls := openPRURLs(m.runs)
+		if len(urls) == 0 {
+			m.setFlash("no open pull requests")
+			return m, nil
+		}
+		m.setFlash(fmt.Sprintf("opening %d pull request(s)", len(urls)))
+		return m, openAll(urls)
 	case "a":
 		m.modal = modalAutonomy
 		return m, nil
@@ -794,6 +802,40 @@ func (m Model) keyModal(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, nil
+}
+
+// openPRURLs lists the pull requests waiting on the operator, oldest
+// first, each once: proposals MARSHAL opened or is triaging. A release PR
+// updated in place has several runs and one URL.
+func openPRURLs(runs []store.Run) []string {
+	seen := map[string]bool{}
+	var urls []string
+	for i := len(runs) - 1; i >= 0; i-- { // runs are newest first
+		r := runs[i]
+		if r.Status != store.Proposed || r.PRURL == "" || seen[r.PRURL] {
+			continue
+		}
+		seen[r.PRURL] = true
+		urls = append(urls, r.PRURL)
+	}
+	return urls
+}
+
+// openAll opens each URL in the browser, one gh call at a time so the
+// browser gets them in order.
+func openAll(urls []string) tea.Cmd {
+	return func() tea.Msg {
+		var failed []string
+		for _, u := range urls {
+			if err := exec.Command("gh", "pr", "view", u, "--web").Run(); err != nil {
+				failed = append(failed, u)
+			}
+		}
+		if len(failed) > 0 {
+			return actionDone{err: fmt.Errorf("could not open %d of %d: %s", len(failed), len(urls), strings.Join(failed, " "))}
+		}
+		return actionDone{msg: fmt.Sprintf("opened %d pull request(s)", len(urls))}
+	}
 }
 
 // openPR opens the run's pull request in the browser via gh, which knows
