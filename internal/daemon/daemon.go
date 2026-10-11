@@ -256,7 +256,7 @@ func (d *Daemon) Reconcile(ctx context.Context) {
 	}
 	swept := 0
 	for _, e := range entries {
-		if e.IsDir() && (strings.HasPrefix(e.Name(), "run-") || strings.HasPrefix(e.Name(), "verify-")) {
+		if e.IsDir() && (strings.HasPrefix(e.Name(), "run-") || strings.HasPrefix(e.Name(), "verify-") || strings.HasPrefix(e.Name(), "task-")) {
 			if os.RemoveAll(filepath.Join(root, e.Name())) == nil {
 				swept++
 			}
@@ -284,6 +284,7 @@ func (d *Daemon) tick(ctx context.Context) {
 	d.upgradeReleased(ctx)
 	d.maybeRestart()
 	d.maybeDigest(ctx)
+	d.maybePrune(ctx)
 	d.announceHold(ctx)
 	if d.NoSchedule {
 		return
@@ -888,6 +889,29 @@ func (d *Daemon) maybeDigest(ctx context.Context) {
 	}
 	d.send(ctx, notify.Event{Kind: notify.Digest, Title: "daily digest", Body: text})
 	_ = d.Store.SetSetting(ctx, "digest_last", today)
+}
+
+// eventKeep is how long a finished run's event log is kept. Long enough to
+// read a run back while its PR is reviewed; the run row outlives it.
+const eventKeep = 30 * 24 * time.Hour
+
+// maybePrune drops old event logs once a day so the database does not grow
+// with every agent stream forever. SQLite reuses the freed pages.
+func (d *Daemon) maybePrune(ctx context.Context) {
+	now := d.now()
+	today := now.Format("2006-01-02")
+	if last, _ := d.Store.Setting(ctx, "prune_last", ""); last == today {
+		return
+	}
+	n, err := d.Store.PruneEvents(ctx, now.Add(-eventKeep))
+	if err != nil {
+		d.fail("prune: %v", err)
+		return
+	}
+	if n > 0 {
+		d.Log.Printf("pruned %d event(s) of runs finished before %s", n, now.Add(-eventKeep).Format("2006-01-02"))
+	}
+	_ = d.Store.SetSetting(ctx, "prune_last", today)
 }
 
 // DigestText renders the last 24 hours. Usable on a bare Daemon, as the

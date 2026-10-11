@@ -281,6 +281,23 @@ func (s *Store) AppendEvent(ctx context.Context, runID string, e Event) error {
 	return err
 }
 
+// PruneEvents deletes the event logs of runs that finished before cutoff and
+// returns how many events went. Events are every line of every agent stream
+// and are the bulk of the database; the run row, its verdicts and its
+// summary stay, so history, the ladder and spend are unaffected. A merge
+// the revert watch has not settled keeps its log.
+func (s *Store) PruneEvents(ctx context.Context, cutoff time.Time) (int, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM events WHERE run_id IN (
+		SELECT id FROM runs WHERE finished_at>0 AND finished_at<? AND status<>?
+		AND NOT (status=? AND merged_by IN ('auto','soak') AND settled=0))`,
+		cutoff.Unix(), Running, Merged)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // ErrNotFound is returned for an unknown run.
 var ErrNotFound = errors.New("not found")
 

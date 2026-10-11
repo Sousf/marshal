@@ -52,6 +52,10 @@ func (c Claude) Args(req Request) []string {
 		// followed the operator's private commit rules instead of the brief.
 		// Credentials are not settings and still load.
 		"--setting-sources", "project",
+		// No MCP servers at all: not a repo's .mcp.json, not the account's
+		// claude.ai connectors. Each one adds its tool names and
+		// instructions to every turn of a run that has no use for them.
+		"--strict-mcp-config",
 	}
 	if req.Model != "" {
 		args = append(args, "--model", req.Model)
@@ -101,7 +105,9 @@ func (c Claude) Run(ctx context.Context, req Request, emit func(Event)) (Result,
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = req.Dir
 	cmd.Stdin = strings.NewReader(req.Prompt)
-	cmd.Env = append(os.Environ(), req.Env...)
+	// Connectors come from the login rather than any config file, so the
+	// flag alone may not keep them out.
+	cmd.Env = append(append(os.Environ(), req.Env...), "ENABLE_CLAUDEAI_MCP_SERVERS=false")
 	// Stderr carries MCP connection chatter and the occasional real error.
 	// Keep the last few lines for the failure message rather than dropping
 	// them, which is what the first version of this did and regretted.

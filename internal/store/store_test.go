@@ -222,3 +222,42 @@ func TestTrust(t *testing.T) {
 		t.Errorf("%d rows", len(all))
 	}
 }
+
+func TestPruneEvents(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	now := time.Now()
+	old := now.Add(-60 * 24 * time.Hour)
+	mk := func(st Status, fin time.Time, mergedBy string) *Run {
+		r := &Run{Job: "j", Repo: "r"}
+		if err := s.CreateRun(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		r.Status, r.FinishedAt, r.MergedBy = st, fin, mergedBy
+		if err := s.UpdateRun(ctx, r); err != nil {
+			t.Fatal(err)
+		}
+		s.AppendEvent(ctx, r.ID, Event{Kind: "text", Text: "x"})
+		s.AppendEvent(ctx, r.ID, Event{Kind: "text", Text: "y"})
+		return r
+	}
+	gone := mk(Proposed, old, "")
+	human := mk(Merged, old, "human")
+	recent := mk(Proposed, now, "")
+	watched := mk(Merged, old, "auto")
+	running := mk(Running, time.Time{}, "")
+
+	n, err := s.PruneEvents(ctx, now.Add(-30*24*time.Hour))
+	if err != nil || n != 4 {
+		t.Fatalf("pruned %d, %v", n, err)
+	}
+	for r, want := range map[*Run]int{gone: 0, human: 0, recent: 2, watched: 2, running: 2} {
+		ev, _ := s.Events(ctx, r.ID)
+		if len(ev) != want {
+			t.Errorf("run %s (%s): %d events, want %d", r.ID, r.Status, len(ev), want)
+		}
+	}
+	if got, _ := s.GetRun(ctx, gone.ID); got.Status != Proposed {
+		t.Errorf("the run row must survive: %+v", got)
+	}
+}

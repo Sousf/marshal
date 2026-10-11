@@ -55,6 +55,7 @@ func TestReconcile(t *testing.T) {
 	d.Store.CreateRun(ctx, zombie)
 	os.MkdirAll(filepath.Join(d.WorkRoot, "run-dead-123"), 0o755)
 	os.MkdirAll(filepath.Join(d.WorkRoot, "verify-dead-456"), 0o755)
+	os.MkdirAll(filepath.Join(d.WorkRoot, "task-dead-789"), 0o755)
 	os.MkdirAll(filepath.Join(d.WorkRoot, "keep-me"), 0o755)
 	d.Reconcile(ctx)
 	got, _ := d.Store.GetRun(ctx, zombie.ID)
@@ -66,6 +67,9 @@ func TestReconcile(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(d.WorkRoot, "verify-dead-456")); !os.IsNotExist(err) {
 		t.Error("orphaned verify tree should be removed")
+	}
+	if _, err := os.Stat(filepath.Join(d.WorkRoot, "task-dead-789")); !os.IsNotExist(err) {
+		t.Error("orphaned task scratch directory should be removed")
 	}
 	if _, err := os.Stat(filepath.Join(d.WorkRoot, "keep-me")); err != nil {
 		t.Error("unrelated directories are left alone")
