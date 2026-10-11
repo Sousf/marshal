@@ -183,7 +183,15 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		logf("note", "probe: %s", pr.Reason)
 	}
 	con, baseline := x.baseline(ctx, ws.Dir, logf)
-	prompt := brief
+	// Stable first: the brief, the rules and the memory snapshot are the
+	// same for every run of this job until a reviewed change lands, so a
+	// prompt cache can reuse them. What changes every run goes last.
+	prompt := brief + jobs.Contract + skills.Contract
+	mem := x.openMemory(ctx, rec.ID, identity, harnessEnv, logf)
+	defer mem.close()
+	if m := mem.brief(job.Name + " " + job.Description + " " + repo.Name + " " + brief); m != "" {
+		prompt += "\n" + m
+	}
 	if c := con.Brief(baseline); c != "" {
 		prompt += "\n" + c
 	}
@@ -193,13 +201,8 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 	if job.Class == "memory" {
 		prompt += "\n" + fleetFeedback(ctx, x.Store, time.Now().Add(-7*24*time.Hour))
 	}
-	mem := x.openMemory(ctx, rec.ID, identity, harnessEnv, logf)
-	defer mem.close()
-	if m := mem.brief(job.Name + " " + job.Description + " " + repo.Name + " " + brief); m != "" {
-		prompt += "\n" + m
-	}
 	req := runner.Request{
-		Prompt:          prompt + jobs.Contract + skills.Contract,
+		Prompt:          prompt,
 		SystemPrompt:    systemPrompt(repo, ws.Conventions()),
 		Dir:             ws.Dir,
 		Model:           res.Model,
@@ -380,15 +383,16 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	con, baseline := x.baseline(ctx, ws.Dir, logf)
 	var b strings.Builder
 	b.WriteString(brief)
-	if c := con.Brief(baseline); c != "" {
-		b.WriteString("\n" + c)
-	}
-	fmt.Fprintf(&b, "\n## The pull request\n\n%s\n\nOriginal job `%s`: %s\n\nTitle: %s\n\n<pr-body>\n%s\n</pr-body>\n", parent.PRURL, job.Name, job.Description, pr.Title, strings.TrimSpace(pr.Body))
+	b.WriteString(jobs.Contract)
 	mem := x.openMemory(ctx, rec.ID, identity, harnessEnv, logf)
 	defer mem.close()
 	if m := mem.brief(kind + " " + job.Name + " " + job.Description + " " + repo.Name + " " + firstLine(logs)); m != "" {
 		b.WriteString("\n" + m)
 	}
+	if c := con.Brief(baseline); c != "" {
+		b.WriteString("\n" + c)
+	}
+	fmt.Fprintf(&b, "\n## The pull request\n\n%s\n\nOriginal job `%s`: %s\n\nTitle: %s\n\n<pr-body>\n%s\n</pr-body>\n", parent.PRURL, job.Name, job.Description, pr.Title, strings.TrimSpace(pr.Body))
 	switch kind {
 	case "address-review":
 		b.WriteString("\n## The reviewer's comments\n\n" + strings.TrimSpace(logs) + "\n")
@@ -399,7 +403,6 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 			b.WriteString("\n## Failing checks\n\n" + logs + "\n")
 		}
 	}
-	b.WriteString(jobs.Contract)
 
 	req := runner.Request{
 		Prompt:          b.String(),

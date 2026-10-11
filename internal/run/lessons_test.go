@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Sousf/marshal/internal/store"
 )
@@ -86,5 +87,21 @@ func TestHistory(t *testing.T) {
 	}
 	if strings.Contains(h, "fix-checks") {
 		t.Error("follow-ups are not part of the job's history")
+	}
+}
+
+func TestHistoryIsCapped(t *testing.T) {
+	ctx := context.Background()
+	st, _ := store.Open(filepath.Join(t.TempDir(), "m.db"))
+	defer st.Close()
+	for i := 0; i < 6; i++ {
+		r := &store.Run{Job: "j", Repo: "r", Status: store.Rejected, StartedAt: time.Now().Add(time.Duration(i) * time.Hour),
+			Feedback: strings.Repeat("the reviewer wrote a long paragraph here\n", 20)}
+		st.CreateRun(ctx, r)
+		st.UpdateRun(ctx, r)
+	}
+	h := History(ctx, st, "r", "j")
+	if len(h) > HistoryCap+100 || !strings.Contains(h, "marshal runs r") {
+		t.Errorf("history %d bytes:\n%s", len(h), h)
 	}
 }

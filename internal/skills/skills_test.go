@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const sample = `---
@@ -100,5 +101,28 @@ func TestCheck(t *testing.T) {
 		if r := Check(Skill{Name: "n", Description: "d", Body: b}); len(r) == 0 {
 			t.Errorf("should refuse %q", b)
 		}
+	}
+}
+
+func TestCapClipsOnLinesAndPointsAtTheRest(t *testing.T) {
+	short := "one\ntwo"
+	if Cap(short, 100, "F") != short {
+		t.Error("short text must pass through")
+	}
+	long := strings.Repeat("line of operator notes\n", 200)
+	got := Cap(long, OperatorCap, "/m/OPERATOR.md")
+	if len(got) > OperatorCap+80 || !strings.Contains(got, "/m/OPERATOR.md") {
+		t.Errorf("len=%d tail=%q", len(got), got[len(got)-80:])
+	}
+	if !strings.HasSuffix(strings.Split(got, "\n\n(clipped")[0], "notes") {
+		t.Error("clipped mid-line")
+	}
+	// Never splits a multi-byte character.
+	if s := Cap(strings.Repeat("é", 50), 9, "F"); !utf8.ValidString(s) {
+		t.Errorf("invalid UTF-8: %q", s)
+	}
+	l := &Library{Operator: long}
+	if b := l.Brief(nil, "/m"); len(b) > OperatorCap+400 {
+		t.Errorf("operator section uncapped: %d bytes", len(b))
 	}
 }

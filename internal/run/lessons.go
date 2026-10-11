@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/Sousf/marshal/internal/skills"
 	"github.com/Sousf/marshal/internal/store"
 )
 
@@ -162,5 +163,10 @@ func History(ctx context.Context, st *store.Store, repo, job string) string {
 	if n == 0 {
 		return ""
 	}
-	return b.String()
+	// Newest first, so clipping drops the oldest.
+	return skills.Cap(b.String(), HistoryCap, "`marshal runs "+repo+"`") + "\n"
 }
+
+// HistoryCap bounds the history section, in bytes. Reviewer feedback can be
+// long; the brief is not the place for all of it.
+const HistoryCap = 1375

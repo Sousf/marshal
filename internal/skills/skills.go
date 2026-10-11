@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
 )
@@ -294,14 +295,14 @@ func (l *Library) Brief(selected []Skill, mount string) string {
 	var b strings.Builder
 	if l.Operator != "" {
 		b.WriteString("## About the operator\n\nReviewed notes on how the person you work for likes things done. Follow them where they apply.\n\n")
-		b.WriteString(l.Operator + "\n\n")
+		b.WriteString(Cap(l.Operator, OperatorCap, filepath.Join(mount, OperatorFile)) + "\n\n")
 	}
 	if len(l.Skills) > 0 {
 		b.WriteString("## Skills\n\nProcedures MARSHAL learned on earlier runs, reviewed by the operator. Use the ones that apply. If one is wrong or incomplete for what you find, propose the corrected version under the same name at the end of your report.\n\n")
 		sel := map[string]bool{}
 		for _, s := range selected {
 			sel[s.Name] = true
-			fmt.Fprintf(&b, "### %s\n\n%s\n\n%s\n\n", s.Name, s.Description, s.Body)
+			fmt.Fprintf(&b, "### %s\n\n%s\n\n%s\n\n", s.Name, s.Description, Cap(s.Body, SkillCap, filepath.Join(mount, s.Path)))
 		}
 		var others []string
 		for _, s := range l.Skills {
@@ -314,6 +315,32 @@ func (l *Library) Brief(selected []Skill, mount string) string {
 		}
 	}
 	return b.String()
+}
+
+// Caps on memory in a brief, in bytes. Memory grows with every reviewed
+// proposal; the brief must not. Small and fixed also keeps the stable front
+// of every prompt the same from run to run, which is what a prompt cache
+// keys on. The operator cap is Hermes's user-profile size.
+const (
+	OperatorCap = 2200
+	SkillCap    = 2000
+)
+
+// Cap clips s to at most n bytes on a line boundary and says where the rest
+// is. The agent can read the full file; the brief only carries the start.
+func Cap(s string, n int, full string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	cut := s[:n]
+	if i := strings.LastIndexByte(cut, '\n'); i > n/2 {
+		cut = cut[:i]
+	}
+	return strings.TrimRight(cut, " \n") + "\n\n(clipped at " + fmt.Sprint(n) + " bytes; the rest is in " + full + ")"
 }
 
 // Contract is appended to the brief: how to propose a skill.
