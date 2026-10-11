@@ -652,8 +652,17 @@ func (s *Store) Events(ctx context.Context, runID string) ([]Event, error) {
 // CountSince counts runs for a repo that reached any of the given statuses
 // after t. It backs the per-day caps.
 func (s *Store) CountSince(ctx context.Context, repo string, since time.Time, statuses ...Status) (int, error) {
+	return s.CountSinceExcept(ctx, repo, since, nil, statuses...)
+}
+
+// CountSinceExcept is CountSince leaving out runs of the named jobs.
+func (s *Store) CountSinceExcept(ctx context.Context, repo string, since time.Time, exceptJobs []string, statuses ...Status) (int, error) {
 	q := `SELECT COUNT(*) FROM runs WHERE repo=? AND started_at>=?`
 	args := []any{repo, since.Unix()}
+	for _, j := range exceptJobs {
+		q += ` AND job<>?`
+		args = append(args, j)
+	}
 	if len(statuses) > 0 {
 		q += ` AND status IN (`
 		for i, st := range statuses {

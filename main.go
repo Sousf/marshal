@@ -1039,7 +1039,7 @@ func cmdPrompt(f *config.Fleet, args []string) error {
 }
 
 func cmdRun(ctx context.Context, f *config.Fleet, args []string) error {
-	opts := run.Options{Log: os.Stdout}
+	opts := run.Options{Log: os.Stdout, Operator: true}
 	var pos []string
 	for _, a := range args {
 		switch a {

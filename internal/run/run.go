@@ -44,6 +44,10 @@ type Options struct {
 	// AllowRed opens the pull request even when the repository's own checks
 	// fail on it, as long as nothing that passed before was broken.
 	AllowRed bool
+	// Operator marks a run the operator asked for by hand. It is exempt
+	// from the PRs-per-repo cap, which exists to stop MARSHAL flooding a
+	// repo on its own; the spend cap still applies.
+	Operator bool
 }
 
 // Executor holds what every run needs.
@@ -138,7 +142,7 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 	}
 
 	// Caps are checked before anything is cloned or spent.
-	if err := x.checkCaps(ctx, repo); err != nil {
+	if err := x.checkCaps(ctx, repo, opts.Operator); err != nil {
 		return store.Run{}, err
 	}
 
@@ -805,11 +809,26 @@ func (x *Executor) workRoot() string {
 }
 
 // checkCaps enforces the fleet-wide daily limits.
-func (x *Executor) checkCaps(ctx context.Context, repo config.Repo) error {
+// CheckCaps reports whether a run on repo would be refused by the daily
+// caps, so a caller can say so before it hands out a run ID.
+func (x *Executor) CheckCaps(ctx context.Context, repoName string, operator bool) error {
+	repo, ok := x.Fleet.Repo(repoName)
+	if !ok {
+		return fmt.Errorf("unknown repo %q", repoName)
+	}
+	return x.checkCaps(ctx, repo, operator)
+}
+
+// uncappedJobs open pull requests that are not the agent's: MARSHAL's
+// deterministic release and brew-setup PRs, and Dependabot's. They do not
+// count toward the PRs-per-repo cap.
+var uncappedJobs = []string{ReleaseJob, BrewSetupJob, "dependabot"}
+
+func (x *Executor) checkCaps(ctx context.Context, repo config.Repo, operator bool) error {
 	caps := x.Fleet.Policy.Caps
 	since := time.Now().Add(-24 * time.Hour)
-	if caps.PRsPerRepoPerDay > 0 {
-		n, err := x.Store.CountSince(ctx, repo.Name, since, store.Proposed, store.Merged)
+	if caps.PRsPerRepoPerDay > 0 && !operator {
+		n, err := x.Store.CountSinceExcept(ctx, repo.Name, since, uncappedJobs, store.Proposed, store.Merged)
 		if err != nil {
 			return err
 		}

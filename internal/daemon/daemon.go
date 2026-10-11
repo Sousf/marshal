@@ -1233,6 +1233,17 @@ func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) 
 
 // TriggerOpts is Trigger with the probe bypassed when force is set.
 func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) (string, error) {
+	return d.triggerJob(ctx, job, repo, force, false)
+}
+
+// Request is a job the operator asked for by hand: exempt from the
+// PRs-per-repo cap, and refused up front, not in the background, when a
+// cap or a busy repo stands in the way.
+func (d *Daemon) Request(ctx context.Context, job, repo string, force bool) (string, error) {
+	return d.triggerJob(ctx, job, repo, force, true)
+}
+
+func (d *Daemon) triggerJob(ctx context.Context, job, repo string, force, operator bool) (string, error) {
 	d.init()
 	if _, ok := d.Fleet.Job(job); !ok && job != run.BrewSetupJob {
 		return "", fmt.Errorf("unknown job %q", job)
@@ -1242,6 +1253,12 @@ func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) 
 	}
 	if err := d.heldErr(ctx); err != nil && job != run.ReleaseJob {
 		return "", err
+	}
+	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
+	if job != run.ReleaseJob && job != run.BrewSetupJob {
+		if err := x.CheckCaps(ctx, repo, operator); err != nil {
+			return "", err
+		}
 	}
 	d.mu.Lock()
 	if id, ok := d.running[repo]; ok {
@@ -1253,14 +1270,13 @@ func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) 
 	d.mu.Unlock()
 
 	d.Log.Printf("run %s: starting %s on %s", id, job, repo)
-	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
 	go func() {
 		defer func() {
 			d.mu.Lock()
 			delete(d.running, repo)
 			d.mu.Unlock()
 		}()
-		rec, err := x.Execute(d.base, job, repo, run.Options{ID: id, Force: force})
+		rec, err := x.Execute(d.base, job, repo, run.Options{ID: id, Force: force, Operator: operator})
 		if err != nil {
 			d.fail("run %s: %v", id, err)
 			return
@@ -1291,6 +1307,16 @@ func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) 
 // subject to the repo's one-run-at-a-time rule; without one it runs beside
 // anything else.
 func (d *Daemon) TriggerTask(ctx context.Context, name, prompt, repoName, class string) (string, error) {
+	return d.triggerTask(ctx, name, prompt, repoName, class, false)
+}
+
+// RequestTask is a task the operator typed: exempt from the PRs-per-repo
+// cap, and refused up front when a cap stands in the way.
+func (d *Daemon) RequestTask(ctx context.Context, name, prompt, repoName string) (string, error) {
+	return d.triggerTask(ctx, name, prompt, repoName, "", true)
+}
+
+func (d *Daemon) triggerTask(ctx context.Context, name, prompt, repoName, class string, operator bool) (string, error) {
 	d.init()
 	if strings.TrimSpace(prompt) == "" {
 		return "", fmt.Errorf("task: empty prompt")
@@ -1310,6 +1336,10 @@ func (d *Daemon) TriggerTask(ctx context.Context, name, prompt, repoName, class 
 		}
 		repo = &r
 		key = r.Name
+		check := &run.Executor{Fleet: d.Fleet, Store: d.Store}
+		if err := check.CheckCaps(ctx, r.Name, operator); err != nil {
+			return "", err
+		}
 	}
 	d.mu.Lock()
 	id := store.NewID()
@@ -1346,7 +1376,7 @@ func (d *Daemon) TriggerTask(ctx context.Context, name, prompt, repoName, class 
 			delete(d.running, key)
 			d.mu.Unlock()
 		}()
-		rec, err := x.Task(d.base, name, prompt, repo, class, run.Options{ID: id})
+		rec, err := x.Task(d.base, name, prompt, repo, class, run.Options{ID: id, Operator: operator})
 		if err != nil {
 			d.fail("run %s: %v", id, err)
 			return
@@ -1480,13 +1510,13 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 		}
 		return api.Response{Run: &r, Events: ev}
 	case "trigger":
-		id, err := d.TriggerOpts(ctx, req.Job, req.Repo, req.Value == "force")
+		id, err := d.Request(ctx, req.Job, req.Repo, req.Value == "force")
 		if err != nil {
 			return api.Fail("%v", err)
 		}
 		return api.Response{ID: id}
 	case "task":
-		id, err := d.TriggerTask(ctx, req.Job, req.Value, req.Repo, "")
+		id, err := d.RequestTask(ctx, req.Job, req.Value, req.Repo)
 		if err != nil {
 			return api.Fail("%v", err)
 		}

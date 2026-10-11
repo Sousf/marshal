@@ -1185,3 +1185,32 @@ func waitUpgrade(t *testing.T, d *Daemon) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestOperatorRequestsSkipThePRCapAndRefusalsAreImmediate(t *testing.T) {
+	ctx := context.Background()
+	d, _ := newDaemon(t, &fakeGH{prs: map[string]github.PR{}})
+	d.Fleet.Policy.Caps.PRsPerRepoPerDay = 1
+	// A deterministic release PR does not use up the cap.
+	d.Store.CreateRun(ctx, &store.Run{Job: "release", Repo: "x", Status: store.Proposed, StartedAt: time.Now()})
+	if _, err := d.Trigger(ctx, "audit", "x"); err != nil {
+		t.Fatalf("release PR counted toward the cap: %v", err)
+	}
+	wait(t, d)
+	d.Store.CreateRun(ctx, &store.Run{Job: "audit", Repo: "x", Status: store.Proposed, StartedAt: time.Now()})
+	// MARSHAL on its own is refused, and says so before handing out an ID.
+	if _, err := d.Trigger(ctx, "audit", "x"); err == nil || !strings.Contains(err.Error(), "cap:") {
+		t.Errorf("scheduled run past the cap: %v", err)
+	}
+	if _, err := d.TriggerTask(ctx, "", "tidy", "x", ""); err == nil {
+		t.Error("scheduled task past the cap should be refused up front")
+	}
+	// The operator is not.
+	if _, err := d.Request(ctx, "audit", "x", false); err != nil {
+		t.Errorf("operator request refused: %v", err)
+	}
+	wait(t, d)
+	if _, err := d.RequestTask(ctx, "", "tidy", "x"); err != nil {
+		t.Errorf("operator task refused: %v", err)
+	}
+	wait(t, d)
+}
