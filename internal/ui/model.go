@@ -190,6 +190,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
+		// Row strings carry the spinner frame baked in, so rebuild them
+		// while anything is running; otherwise the list spinners freeze
+		// between data refreshes.
+		if m.anyRunning() {
+			m.fillLists()
+		}
 		return m, cmd
 	case tick:
 		cmds := []tea.Cmd{m.refresh(), tickCmd()}
@@ -296,6 +302,18 @@ func (m *Model) fillLists() {
 			fmt.Sprint(t.Approvals), fmt.Sprint(t.Rejections), fmt.Sprint(t.Reverts), ""})
 	}
 	m.trustList.setRows(trows)
+}
+
+func (m Model) anyRunning() bool {
+	if len(m.status.Running) > 0 {
+		return true
+	}
+	for _, r := range m.runs {
+		if r.Status == store.Running {
+			return true
+		}
+	}
+	return false
 }
 
 func statusCell(s store.Status, spin string) string {

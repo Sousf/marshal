@@ -58,7 +58,11 @@ func versionLabel(v string) string {
 	if v == "" || v == "dev" {
 		return "dev build"
 	}
-	return "v" + strings.TrimPrefix(v, "v")
+	// Semver gets a v; a commit hash or anything else is shown as is.
+	if v[0] >= '0' && v[0] <= '9' {
+		return "v" + v
+	}
+	return v
 }
 
 // clipLines keeps the first n lines so a body can never push the footer off
@@ -119,8 +123,9 @@ func (m Model) tabs() string {
 	}
 	var out []string
 	for i, n := range names {
-		label := fmt.Sprintf("%d %s", i+1, n)
-		if i == 1 && len(m.status.Running) > 0 {
+		// The key is bracketed so "2 runs" cannot read as a count.
+		label := fmt.Sprintf("[%d] %s", i+1, n)
+		if i == 1 && m.anyRunning() {
 			label += " " + m.spin.View()
 		}
 		if screen(i) == cur {

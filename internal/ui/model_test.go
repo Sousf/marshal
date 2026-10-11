@@ -83,7 +83,7 @@ func loaded(t *testing.T) Model {
 func TestBannerAndDashboard(t *testing.T) {
 	m := loaded(t)
 	v := m.View()
-	for _, want := range []string{"███╗", "Learns", "alpha", "beta", "1 waiting", "review", "autonomy on", "no daemon", "1 dashboard"} {
+	for _, want := range []string{"███╗", "Learns", "alpha", "beta", "1 waiting", "review", "autonomy on", "no daemon", "[1] dashboard"} {
 		if !strings.Contains(v, want) {
 			t.Errorf("dashboard missing %q", want)
 		}
@@ -241,6 +241,43 @@ func TestHelpAndQuit(t *testing.T) {
 	_, cmd := step(m, key("q"))
 	if cmd == nil {
 		t.Fatal("q on a top-level screen should quit")
+	}
+}
+
+func TestSpinnerAdvancesRows(t *testing.T) {
+	m, st := fixture(t)
+	st.CreateRun(context.Background(), &store.Run{Job: "audit", Repo: "alpha", Class: "c", Status: store.Running})
+	m, _ = step(m, m.refresh()())
+	m, _ = step(m, key("2"))
+	before := m.View()
+	// Drive the spinner through its own tick messages, as the runtime would.
+	cmd := m.spin.Tick
+	changed := false
+	for i := 0; i < 6; i++ {
+		msg := cmd()
+		var next tea.Cmd
+		m, next = step(m, msg)
+		if next == nil {
+			t.Fatal("spinner tick must schedule the next tick")
+		}
+		if m.View() != before {
+			changed = true
+		}
+		cmd = next
+	}
+	if !changed {
+		t.Error("list rows should re-render with the spinner while a run is in flight")
+	}
+	if !strings.Contains(m.View(), "[2] runs") {
+		t.Error("tab label should bracket the key")
+	}
+}
+
+func TestVersionLabel(t *testing.T) {
+	for in, want := range map[string]string{"dev": "dev build", "": "dev build", "0.3.1": "v0.3.1", "e63dc89-dirty": "e63dc89-dirty"} {
+		if got := versionLabel(in); got != want {
+			t.Errorf("versionLabel(%q) = %q want %q", in, got, want)
+		}
 	}
 }
 
