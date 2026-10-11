@@ -280,8 +280,15 @@ func (x *Executor) brewSetup(ctx context.Context, repo config.Repo, opts Options
 		did = append(did, "`"+releaseWorkflow+"`: tags `VERSION` when a release PR merges and runs GoReleaser")
 	}
 	build := buildCheck(ctx, ws.Dir, facts.Main)
+	if build != "" {
+		// Same rule as every other PR: nothing opens with a failing check.
+		// A cgo tool needs a native toolchain per platform, which the
+		// template does not set up.
+		logf("blocked", "CGO_ENABLED=0 build fails; set up its release by hand:\n%s", build)
+		return finish(store.Skipped, "brew: does not build with CGO_ENABLED=0 (cgo?); set up by hand")
+	}
 	title := "Release through Homebrew"
-	body := releaseSetupBody(facts, did, build)
+	body := releaseSetupBody(facts, did)
 	if err := ws.Commit(ctx, title+"\n\n"+body); err != nil {
 		return finish(store.Failed, err.Error())
 	}
@@ -322,17 +329,13 @@ func buildCheck(ctx context.Context, dir, main string) string {
 	return s
 }
 
-func releaseSetupBody(f BrewFacts, did []string, build string) string {
+func releaseSetupBody(f BrewFacts, did []string) string {
 	var b strings.Builder
 	b.WriteString("MARSHAL onboarding found this repository is not released through Homebrew yet. This adds, from fixed templates and without an agent:\n\n")
 	for _, d := range did {
 		b.WriteString("- " + d + "\n")
 	}
-	if build == "" {
-		b.WriteString("\n`CGO_ENABLED=0 go build " + f.Main + "` for linux/amd64 succeeds.\n")
-	} else {
-		b.WriteString("\n**`CGO_ENABLED=0 go build " + f.Main + "` failed for linux/amd64.** Adjust the build before merging:\n\n```\n" + build + "\n```\n")
-	}
+	b.WriteString("\n`CGO_ENABLED=0 go build " + f.Main + "` for linux/amd64 succeeds.\n")
 	b.WriteString("\n## One step only you can do\n\nThe workflow pushes the formula with a deploy key that can write to " + f.Tap + " and nothing else. MARSHAL cannot create it: that needs admin rights it deliberately does not have. Before the first release, run:\n\n```sh\nmarshal tap-key " + f.Repo + "\n```\n")
 	b.WriteString("\nAfter that, merging MARSHAL's release PR publishes, and `brew install " + strings.Replace(f.Tap, "/homebrew-", "/", 1) + "/" + f.Bin + "` installs.\n")
 	return b.String()

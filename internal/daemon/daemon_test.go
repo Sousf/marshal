@@ -874,3 +874,31 @@ func TestQuotaHoldParksTheFleet(t *testing.T) {
 	}
 	wait(t, d)
 }
+
+func TestNothingElseRunsWhileOnboarding(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"onb": {State: "OPEN", Checks: "PENDING"}}}
+	d, a := newDaemon(t, gh)
+	d.Store.CreateRun(ctx, &store.Run{Job: "onboard", Repo: "x", Class: "hardening", Status: store.Proposed, PRURL: "onb", StartedAt: time.Now()})
+	if err := d.schedule(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, d)
+	if a.calls != 0 {
+		t.Errorf("a job ran on a repo whose onboarding PR is open: %d calls", a.calls)
+	}
+}
+
+func TestNoFollowupsForUnknownJobs(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"sk": {State: "OPEN", Checks: "FAILURE", HeadSHA: "abc"}}}
+	d, a := newDaemon(t, gh)
+	d.Store.CreateRun(ctx, &store.Run{Job: "skill", Repo: "x", Class: "hardening", Status: store.Proposed, PRURL: "sk", StartedAt: time.Now()})
+	if err := d.syncProposals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wait(t, d)
+	if a.calls != 0 || len(d.inFlight()) != 0 {
+		t.Errorf("follow-up started for a skill proposal: %d calls", a.calls)
+	}
+}

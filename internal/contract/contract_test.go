@@ -131,3 +131,42 @@ func TestScrub(t *testing.T) {
 		t.Errorf("%v", env)
 	}
 }
+
+func TestStripHostSetup(t *testing.T) {
+	for _, c := range []struct {
+		step, kept string
+		dropped    int
+	}{
+		{"go test ./...", "go test ./...", 0},
+		{"sudo apt-get update && sudo apt-get install -y libpcap-dev", "", 2},
+		{"sudo apt-get install -y libpcap-dev\ngo build ./...", "go build ./...", 1},
+		{"if [ -n \"$(gofmt -l .)\" ]; then\n  exit 1\nfi", "if [ -n \"$(gofmt -l .)\" ]; then\n  exit 1\nfi", 0},
+		{"if true; then\n  sudo apt-get install x\nfi\ngo test ./...", "", 1},
+		{"brew install foo; go test", "", 1},
+		{"go build ./... # sudo is fine in a comment", "go build ./... # sudo is fine in a comment", 0},
+	} {
+		kept, dropped := stripHostSetup(c.step)
+		if kept != c.kept || len(dropped) != c.dropped {
+			t.Errorf("%q: kept %q dropped %v", c.step, kept, dropped)
+		}
+	}
+}
+
+func TestDeriveLeavesOutRunnerSetup(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".github", "workflows"), 0o755)
+	os.WriteFile(filepath.Join(dir, ".github", "workflows", "ci.yml"), []byte(`on: [pull_request]
+jobs:
+  t:
+    steps:
+      - run: sudo apt-get update && sudo apt-get install -y libpcap-dev
+      - run: go test ./...
+`), 0o644)
+	c, ok, err := Load(dir)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	if c.Verbs["ci"] != "go test ./..." || len(c.HostSetup) != 2 {
+		t.Errorf("ci=%q setup=%v", c.Verbs["ci"], c.HostSetup)
+	}
+}

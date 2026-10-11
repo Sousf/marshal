@@ -160,3 +160,23 @@ homebrew: {tap: o/homebrew-tap}
 		t.Errorf("wired repo: %s %q", rec.Status, rec.Error)
 	}
 }
+
+func TestBrewSetupRefusesWhatDoesNotBuild(t *testing.T) {
+	o := origin(t)
+	write(t, o, map[string]string{"main.go": "package main\n\n// #include <stdio.h>\nimport \"C\"\n\nfunc main() {}\n"})
+	for _, args := range [][]string{{"add", "."}, {"commit", "--quiet", "-m", "cgo"}} {
+		c := exec.Command("git", args...)
+		c.Dir = o
+		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		c.CombinedOutput()
+	}
+	f, _ := config.Parse([]byte("version: 1\nrepos:\n  - {name: x, url: " + o + ", github: o/x}\npolicy:\n  classes: {release: {start: review}}\nhomebrew: {tap: o/homebrew-tap}\n"))
+	st, _ := store.Open(filepath.Join(t.TempDir(), "m.db"))
+	defer st.Close()
+	x := &Executor{Fleet: f, Store: st, Adapter: &stepwise{}, WorkRoot: t.TempDir()}
+	repo, _ := f.Repo("x")
+	rec, _ := x.brewSetup(context.Background(), repo, Options{NoPR: true})
+	if rec.Status != store.Skipped || !strings.Contains(rec.Error, "CGO_ENABLED=0") {
+		t.Errorf("cgo repo: %s %q", rec.Status, rec.Error)
+	}
+}

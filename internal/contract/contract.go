@@ -48,6 +48,10 @@ type Contract struct {
 	// Derived marks a contract synthesised from workflows rather than read
 	// from marshal.yaml.
 	Derived bool `yaml:"-"`
+	// HostSetup lists workflow commands left out of a derived contract
+	// because they configure a CI runner (sudo, system package managers),
+	// which MARSHAL never does to its own host.
+	HostSetup []string `yaml:"-"`
 }
 
 // Load reads the contract from a checkout: marshal.yaml when present, else

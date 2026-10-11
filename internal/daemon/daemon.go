@@ -340,7 +340,9 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 		default:
 			// A release PR is the operator's call, and its files are
 			// MARSHAL's own bookkeeping: no agent follows up on it.
-			if r.Job == run.ReleaseJob || r.Job == run.BrewSetupJob {
+			// Nor on anything that is not a fleet job, such as a skill
+			// proposal: there is no brief to follow up with.
+			if _, known := d.Fleet.Job(r.Job); !known || r.Job == run.ReleaseJob {
 				continue
 			}
 			// Red checks on MARSHAL's own PR are MARSHAL's to fix, within a
@@ -1018,6 +1020,9 @@ func (d *Daemon) schedule(ctx context.Context) error {
 		if d.busy(repo.Name) {
 			continue
 		}
+		// While the onboarding PR is open the repo has no baseline yet:
+		// every other agent job would rebuild the same CI and conventions.
+		onboarding := d.openProposal(ctx, repo.Name, "onboard")
 		var ci *github.CI // fetched at most once per repo per tick
 		for _, jn := range repo.Jobs {
 			job, ok := d.Fleet.Job(jn)
@@ -1030,6 +1035,9 @@ func (d *Daemon) schedule(ctx context.Context) error {
 				continue
 			}
 			if s.Manual() {
+				continue
+			}
+			if onboarding && job.Name != run.ReleaseJob {
 				continue
 			}
 			// Under a quota hold only the release job, which uses no
@@ -1089,6 +1097,20 @@ func (d *Daemon) schedule(ctx context.Context) error {
 		d.Log.Printf("%d jobs due; starting one per tick", due)
 	}
 	return nil
+}
+
+// openProposal reports whether a repo has an open proposal from a job.
+func (d *Daemon) openProposal(ctx context.Context, repo, job string) bool {
+	runs, err := d.Store.ListByStatus(ctx, store.Proposed)
+	if err != nil {
+		return false
+	}
+	for _, r := range runs {
+		if r.Repo == repo && r.Job == job {
+			return true
+		}
+	}
+	return false
 }
 
 // skipIfUnchanged records a skipped run when the remote head equals the

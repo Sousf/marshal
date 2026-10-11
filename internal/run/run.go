@@ -525,6 +525,9 @@ func (x *Executor) baseline(ctx context.Context, dir string, logf func(kind, for
 	if !ok {
 		return nil, nil
 	}
+	for _, h := range con.HostSetup {
+		logf("note", "pre-flight leaves out runner setup: %s", h)
+	}
 	results := con.RunAll(ctx, dir, contract.Gate...)
 	for _, r := range results {
 		logf("note", "baseline %s", r)

@@ -105,7 +105,11 @@ func Derive(dir string) (*Derived, bool, error) {
 				if strings.TrimSpace(st.Run) == "" {
 					continue
 				}
-				run := strings.TrimSpace(st.Run)
+				run, dropped := stripHostSetup(st.Run)
+				d.HostSetup = append(d.HostSetup, dropped...)
+				if run == "" {
+					continue
+				}
 				for k, v := range st.Env {
 					run = fmt.Sprintf("%s=%q %s", k, v, run)
 				}
@@ -127,6 +131,53 @@ func Derive(dir string) (*Derived, bool, error) {
 		}
 	}
 	return d, true, nil
+}
+
+// hostSetupRE matches a command that prepares a CI runner rather than
+// checking the code: privilege escalation or a system package manager.
+// Run on MARSHAL's host these would fail at best, and at worst change it.
+var hostSetupRE = regexp.MustCompile(`^(sudo|doas|su|apt|apt-get|aptitude|dpkg|yum|dnf|rpm|zypper|apk|pacman|yay|paru|snap|flatpak|brew|port|choco|winget|scoop)\b`)
+
+// compoundRE spots shell that spans lines: continuations, blocks, loops
+// and heredocs. Such a step cannot be split into commands safely.
+var compoundRE = regexp.MustCompile(`(?m)\\$|^\s*(if|then|else|elif|fi|for|while|until|do|done|case|esac|function)\b|[{}]\s*$|<<`)
+
+// stripHostSetup removes host setup commands from a run step and returns
+// what is left and what was dropped. A step with none is returned
+// verbatim. A plain step, one command per line or joined with &&, loses
+// just those commands. A compound step that contains one is dropped whole:
+// splitting it would change what it means, and running it would fail.
+func stripHostSetup(step string) (string, []string) {
+	step = strings.TrimSpace(step)
+	var cmds []string
+	setup := false
+	for _, line := range strings.Split(step, "\n") {
+		for _, cmd := range strings.Split(line, "&&") {
+			cmd = strings.TrimSpace(cmd)
+			if cmd == "" || strings.HasPrefix(cmd, "#") {
+				continue
+			}
+			cmds = append(cmds, cmd)
+			if hostSetupRE.MatchString(cmd) {
+				setup = true
+			}
+		}
+	}
+	switch {
+	case !setup:
+		return step, nil
+	case compoundRE.MatchString(step) || strings.ContainsAny(step, ";|"):
+		return "", []string{step}
+	}
+	var kept, dropped []string
+	for _, c := range cmds {
+		if hostSetupRE.MatchString(c) {
+			dropped = append(dropped, c)
+		} else {
+			kept = append(kept, c)
+		}
+	}
+	return strings.Join(kept, " && "), dropped
 }
 
 var (
