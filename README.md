@@ -97,7 +97,7 @@ Working today:
   locked set; `sensitive` paths mark a proposal for human review whatever
   the trust level. This repository carries one.
 
-- Chat. `marshal chat`, or `c` in the interface, hands the terminal to
+- Chat. `marshal chat` hands the terminal to
   Claude Code with MARSHAL's context in its system prompt and its tools cut
   down to the `marshal` command line plus read, search and the web. From
   there you can ask what happened, start jobs and tasks, push fixes, and

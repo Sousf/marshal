@@ -250,7 +250,7 @@ func (m Model) footer() string {
 	case m.filtering:
 		keys = [][2]string{{"type", "filter"}, {"enter", "keep"}, {"esc", "clear"}}
 	case m.screen == dashboard:
-		keys = [][2]string{{"j/k", "repo"}, {"enter", "start job"}, {"c", "chat"}, {"t", "task"}, {"o", "its runs"}, {"a", "autonomy"}, {"?", "help"}, {"q", "quit"}}
+		keys = [][2]string{{"j/k", "repo"}, {"enter", "start job"}, {"t", "task"}, {"o", "its runs"}, {"a", "autonomy"}, {"?", "help"}, {"q", "quit"}}
 	case m.screen == runs:
 		keys = [][2]string{{"j/k", "select"}, {"enter", "full log"}, {"/", "filter"}, {"o", "open PR"}, {"x", "fix PR now"}, {"n", "new run"}, {"?", "help"}}
 	case m.screen == trust:
@@ -495,7 +495,7 @@ func (m Model) helpText() string {
 		title string
 		keys  [][2]string
 	}{
-		{"everywhere", [][2]string{{"1 2 3", "dashboard, runs, trust"}, {"tab / S-tab", "next, previous screen"}, {"n", "start a job"}, {"t", "run a free-form task, with or without a repo"}, {"c", "chat with MARSHAL (Claude Code, comes back here on exit)"}, {"a", "autonomy on/off (asks first)"}, {"R", "refresh now"}, {"O", "open every PR waiting on you in the browser"}, {"?", "this help"}, {"q / ctrl-c", "quit, or back from a run"}}},
+		{"everywhere", [][2]string{{"1 2 3", "dashboard, runs, trust"}, {"tab / S-tab", "next, previous screen"}, {"n", "start a job"}, {"t", "run a free-form task, with or without a repo"}, {"a", "autonomy on/off (asks first)"}, {"R", "refresh now"}, {"O", "open every PR waiting on you in the browser"}, {"?", "this help"}, {"q / ctrl-c", "quit, or back from a run"}}},
 		{"dashboard", [][2]string{{"j k h l", "select repo"}, {"enter", "start a job on it"}, {"o", "show its runs"}}},
 		{"runs", [][2]string{{"j k g G", "move, top, bottom"}, {"pgup pgdn", "page"}, {"enter", "open the run"}, {"/", "filter · esc clears · backspace clears a kept filter"}, {"o", "open its PR in the browser"}, {"x", "push a fix to its PR now, outside the attempt cap"}}},
 		{"run", [][2]string{{"j k", "scroll"}, {"f", "follow the live stream"}, {"g G", "top, bottom"}, {"o", "open its PR"}, {"esc", "back to runs"}}},

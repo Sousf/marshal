@@ -819,14 +819,6 @@ func cmdTUI(ctx context.Context, f *config.Fleet) error {
 		return err
 	}
 	defer done()
-	ui.ChatCommand = func(ctx context.Context) (*exec.Cmd, error) {
-		st, err := openStore()
-		if err != nil {
-			return nil, err
-		}
-		defer st.Close()
-		return chatCommand(ctx, f, st, false)
-	}
 	return ui.Run(ctx, src, f, version)
 }
 
