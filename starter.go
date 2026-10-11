@@ -68,6 +68,9 @@ repos:
   - name: arch-rice
     url: git@github.com:Sousf/arch-rice.git
     jobs: [onboard, posture-audit, ci-fix]
+  - name: hmon
+    url: git@github.com:Sousf/hmon.git
+    jobs: [onboard, posture-audit, vuln-fix, ci-fix]
 
 jobs:
   # Jobs may touch the whole repository except the always-locked paths
