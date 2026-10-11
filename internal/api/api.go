@@ -22,7 +22,7 @@ import (
 
 // Request is one call to the daemon.
 type Request struct {
-	// Op is one of: status, runs, run, events, trigger, autonomy, trust, verdict.
+	// Op is one of: status, runs, run, events, trigger, fix, autonomy, trust, verdict.
 	Op    string `json:"op"`
 	Repo  string `json:"repo,omitempty"`
 	Job   string `json:"job,omitempty"`

@@ -409,18 +409,28 @@ func (d *Daemon) fixChecks(ctx context.Context, repo config.Repo, r store.Run, p
 		d.fail("run %s: followups: %v", r.ID, err)
 		return
 	}
-	attempts := 0
+	attempts, blockedHere := 0, 0
 	for _, f := range prior {
 		if f.Status == store.Running {
 			return // one at a time
 		}
-		// A head the agent already worked on is not retried; a Blocked
-		// attempt is the harness refusing the diff, which a policy change
-		// can resolve, so it counts toward the cap but not against the head.
-		if f.BaseHead == pr.HeadSHA && pr.HeadSHA != "" && f.Status != store.Blocked {
-			return
+		if f.BaseHead == pr.HeadSHA && pr.HeadSHA != "" {
+			// The agent already worked on this head. A Blocked attempt is
+			// the harness refusing the diff, not the agent failing, so one
+			// retry is allowed in case policy changed; a second block on
+			// the same head means it has not.
+			if f.Status != store.Blocked {
+				return
+			}
+			blockedHere++
+			if blockedHere >= 2 {
+				return
+			}
 		}
-		if f.Status == store.Pushed || f.Status == store.NoChange || f.Status == store.Failed || f.Status == store.Blocked {
+		// Blocked attempts do not count toward the cap: the agent did its
+		// work and the harness said no, which is MARSHAL's cost, not the
+		// PR's chance.
+		if f.Status == store.Pushed || f.Status == store.NoChange || f.Status == store.Failed {
 			attempts++
 		}
 	}
@@ -435,6 +445,50 @@ func (d *Daemon) fixChecks(ctx context.Context, repo config.Repo, r store.Run, p
 	if d.busy(repo.Name) {
 		return
 	}
+	if _, err := d.startFix(ctx, repo, r, pr, fmt.Sprintf("attempt %d of %d", attempts+1, cap)); err != nil {
+		d.fail("run %s: %v", r.ID, err)
+	}
+}
+
+// Fix starts a check-fixing follow-up for a proposal on demand, outside the
+// cap. It is the operator's way of saying "try again" after the daemon has
+// handed a PR to a human.
+func (d *Daemon) Fix(ctx context.Context, runID string) (string, error) {
+	d.init()
+	r, err := d.Store.GetRun(ctx, runID)
+	if err != nil {
+		return "", err
+	}
+	if r.Parent != "" {
+		// Point at the proposal, not at one of its follow-ups.
+		r, err = d.Store.GetRun(ctx, r.Parent)
+		if err != nil {
+			return "", err
+		}
+	}
+	if r.Status != store.Proposed || r.PRURL == "" {
+		return "", fmt.Errorf("run %s is %s with no open proposal to fix", r.ID, r.Status)
+	}
+	repo, ok := d.Fleet.Repo(r.Repo)
+	if !ok {
+		return "", fmt.Errorf("unknown repo %q", r.Repo)
+	}
+	if d.busy(repo.Name) {
+		return "", fmt.Errorf("%s is busy", repo.Name)
+	}
+	pr, err := d.GH.ViewPR(ctx, r.PRURL)
+	if err != nil {
+		return "", err
+	}
+	if !pr.Merged() && !pr.Closed() {
+		return d.startFix(ctx, repo, r, pr, "requested by the operator")
+	}
+	return "", fmt.Errorf("%s is already %s", r.PRURL, strings.ToLower(pr.State))
+}
+
+// startFix launches the follow-up goroutine; the caller has checked the
+// cap, the busy map and the head.
+func (d *Daemon) startFix(ctx context.Context, repo config.Repo, r store.Run, pr github.PR, why string) (string, error) {
 	slug := repo.GitHub
 	if slug == "" {
 		slug, _ = github.Slug(repo.URL)
@@ -448,10 +502,14 @@ func (d *Daemon) fixChecks(ctx context.Context, repo config.Repo, r store.Run, p
 		logs = l
 	}
 	d.mu.Lock()
+	if id, ok := d.running[repo.Name]; ok {
+		d.mu.Unlock()
+		return "", fmt.Errorf("%s is busy with run %s", repo.Name, id)
+	}
 	id := store.NewID()
 	d.running[repo.Name] = id
 	d.mu.Unlock()
-	d.note(ctx, r.ID, "checks failed on head %s; starting fix run %s (attempt %d of %d)", short(pr.HeadSHA), id, attempts+1, cap)
+	d.note(ctx, r.ID, "checks failed on head %s; starting fix run %s (%s)", short(pr.HeadSHA), id, why)
 	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
 	go func() {
 		defer func() {
@@ -476,6 +534,7 @@ func (d *Daemon) fixChecks(ctx context.Context, repo config.Repo, r store.Run, p
 			_ = d.GH.CommentPR(d.base, r.PRURL, fmt.Sprintf("MARSHAL could not fix the failing checks (run `%s`, %s).\n\n%s", id, rec.Status, msg))
 		}
 	}()
+	return id, nil
 }
 
 // startVerify runs the verifier for a proposal in the background, once per
@@ -755,6 +814,12 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 		return api.Response{Run: &r, Events: ev}
 	case "trigger":
 		id, err := d.Trigger(ctx, req.Job, req.Repo)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{ID: id}
+	case "fix":
+		id, err := d.Fix(ctx, req.ID)
 		if err != nil {
 			return api.Fail("%v", err)
 		}

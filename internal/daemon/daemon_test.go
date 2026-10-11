@@ -462,6 +462,18 @@ func TestRedChecksGetFixedWithinCap(t *testing.T) {
 	if len(gh.labels) != 1 || !strings.Contains(gh.labels[0], "needs-human") {
 		t.Errorf("at the cap the PR is handed to a human: labels=%v", gh.labels)
 	}
+	// The operator can ask for one more, outside the cap.
+	id, err := d.Fix(ctx, r.ID)
+	if err != nil || len(id) != 8 {
+		t.Fatalf("Fix: %v", err)
+	}
+	wait(t, d)
+	if fu, _ := d.Store.Followups(ctx, r.ID); len(fu) != 3 {
+		t.Errorf("manual fix should run: %d", len(fu))
+	}
+	if _, err := d.Fix(ctx, "nope"); err == nil {
+		t.Error("unknown run must fail")
+	}
 	// Nothing merged, nothing verified while red.
 	if len(gh.merged) != 0 {
 		t.Error("a red PR never merges")
@@ -514,6 +526,48 @@ func TestReviewFeedbackIsAddressedAndRecorded(t *testing.T) {
 	wait(t, d)
 	if !strings.Contains(strings.Join(a.prompts, "\n"), "not this way") {
 		t.Error("history with reviewer feedback should reach the next run of the job")
+	}
+}
+
+func TestBlockedFixDoesNotBurnTheCap(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "FAILURE"}}}
+	d, a, dir := newDaemonDir(t, gh)
+	// The fix touches a locked path, so the harness blocks it.
+	a.fix = func(wd string) {
+		os.MkdirAll(filepath.Join(wd, ".github/workflows"), 0o755)
+		os.WriteFile(filepath.Join(wd, ".github/workflows/release.yml"), []byte("x"), 0o644)
+	}
+	r := proposalIn(t, d, gh, dir, "hardening", "u", time.Now())
+	settle(t, d)
+	wait(t, d)
+	fu, _ := d.Store.Followups(ctx, r.ID)
+	if len(fu) != 1 || fu[0].Status != store.Blocked {
+		t.Fatalf("%+v", fu)
+	}
+	// Same head: one retry after a block, which blocks again; then stop.
+	settle(t, d)
+	wait(t, d)
+	settle(t, d)
+	wait(t, d)
+	fu, _ = d.Store.Followups(ctx, r.ID)
+	if len(fu) != 2 {
+		t.Fatalf("one retry after a block on the same head, got %d attempts", len(fu))
+	}
+	// Blocked attempts did not count: the PR is not handed to a human.
+	if len(gh.labels) != 0 {
+		t.Errorf("blocked attempts must not reach the cap: %v", gh.labels)
+	}
+	// Policy is now satisfied: a real attempt follows on a new head.
+	a.fix = func(wd string) { os.WriteFile(filepath.Join(wd, "ok.txt"), []byte("x"), 0o644) }
+	p := gh.prs["u"]
+	p.HeadSHA = "h2"
+	gh.prs["u"] = p
+	settle(t, d)
+	wait(t, d)
+	fu, _ = d.Store.Followups(ctx, r.ID)
+	if len(fu) != 3 || fu[2].Status != store.Pushed {
+		t.Errorf("%+v", fu)
 	}
 }
 

@@ -11,7 +11,12 @@ the report.
    `permissions: contents: read` at the top level. Pin every action to a
    full commit SHA with the version tag in a trailing comment; resolve SHAs
    with `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` and never guess.
-   Run the same commands locally first so the workflow is known to pass.
+   Run the same commands locally first and make them pass before you
+   finish. If `govulncheck` reports findings, fix them in this same
+   change: bump the affected modules to their fixed versions, and for
+   standard-library findings add a `toolchain` line in `go.mod` for the
+   fixed Go release, which `setup-go` honours. A workflow that is red on
+   the pull request that adds it is not finished.
 2. **Dependency updates.** If `.github/dependabot.yml` is missing, add it for
    the package ecosystem and for `github-actions`, weekly.
 3. **Conventions for agents.** If `AGENTS.md` is missing at the root, write

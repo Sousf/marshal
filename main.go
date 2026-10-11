@@ -59,6 +59,7 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
       --no-pr                       commit on a local branch only, open nothing
       --keep                        leave the work tree on disk
   marshal trigger <job> <repo>    ask the daemon to run a job in the background
+  marshal fix <run-id>            ask the daemon to push a fix to that proposal's PR now, outside the cap
   marshal verify <run-id>         run the verifier on a proposal here, in the foreground
       --comment                     also post the verdict on the PR
   marshal runs [repo]             recent runs
@@ -154,6 +155,16 @@ func app(args []string) error {
 		return cmdStatus(ctx)
 	case "trigger":
 		return cmdTrigger(ctx, rest)
+	case "fix":
+		if len(rest) != 1 {
+			return errors.New("usage: marshal fix <run-id>")
+		}
+		resp, err := client().Do(ctx, api.Request{Op: "fix", ID: rest[0]})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("fix run %s started; `marshal show %s` to follow\n", resp.ID, resp.ID)
+		return nil
 	case "autonomy":
 		return cmdAutonomy(ctx, rest)
 	case "verify":

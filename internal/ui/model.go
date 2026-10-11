@@ -540,6 +540,19 @@ func (m Model) keyRuns(s string) (tea.Model, tea.Cmd) {
 			return m, openPR(m.visible[m.runList.cursor])
 		}
 		return m, nil
+	case "x":
+		if m.runList.selected() == nil {
+			return m, nil
+		}
+		r := m.visible[m.runList.cursor]
+		src := m.src
+		return m, func() tea.Msg {
+			id, err := src.Fix(context.Background(), r.ID)
+			if err != nil {
+				return actionDone{err: err}
+			}
+			return actionDone{msg: fmt.Sprintf("fix run %s started for %s", id, r.ID)}
+		}
 	case "backspace":
 		if m.filter.Value() != "" {
 			m.filter.Reset()
