@@ -172,8 +172,9 @@ Working today:
 - Dependabot triage. With a `dependabot` class in the policy, MARSHAL
   checks every repo for Dependabot PRs every 10 minutes and runs the
   verifier on each head once CI has finished. FAIL closes the PR with the
-  reasons. UNSURE, or a deterministic red flag (a new module, a changed
-  Action), labels it for you. PASS with green checks gets MARSHAL's
+  reasons, and so does red CI the verifier couldn't pass. UNSURE, or a
+  deterministic red flag (a new module, a changed Action) on an update
+  whose CI is green, labels it for you. PASS with green checks gets MARSHAL's
   approval, which satisfies a one-approval ruleset. It merges when the
   class's level allows, behind the same gates as MARSHAL's own PRs: kill
   switch, caps, `never:`, soak and revert watch. With `soak`, the window

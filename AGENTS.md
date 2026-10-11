@@ -64,9 +64,10 @@ Rules the code enforces, which no change may weaken:
   template rendered for master; a test checks. `marshal tap-key` runs with
   the operator's gh login, never the app's.
 - Dependabot PRs (`daemon/dependabot.go`) are proposals of job and class
-  `dependabot`. A verifier FAIL closes one without moving the ladder; a
-  FAIL that came from `Checks.Fatal` is downgraded to UNSURE first, so
-  only a judgment closes a PR and a red flag goes to a human. MARSHAL
+  `dependabot`. A verifier FAIL, or red CI without a PASS, closes one
+  without moving the ladder. A FAIL that came from `Checks.Fatal` is
+  downgraded to UNSURE first, so a red flag on a green update goes to a
+  human rather than closing it. MARSHAL
   approves only a PASS head with green checks.
 - Contract verbs run without the host's git config or identity
   (`contract.scrub`), as on a CI runner; tests here do the same through

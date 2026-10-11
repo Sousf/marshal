@@ -1037,3 +1037,25 @@ func TestUnstartedVerifyRecordsNoVerdict(t *testing.T) {
 		t.Errorf("nothing should be posted: labels=%v comments=%v", gh.labels, gh.comments)
 	}
 }
+
+func TestDependabotRedCIAndUnsureIsClosed(t *testing.T) {
+	gh := &fakeGH{prs: map[string]github.PR{}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.verdict = "UNSURE"
+	dependabotPR(t, d, gh, dir, "dep5", "FAILURE", config.Soak)
+	d.discoverDependabot(context.Background())
+	settle(t, d)
+	if len(gh.closed) != 1 {
+		t.Errorf("red CI and no PASS should close: closed=%v", gh.closed)
+	}
+	// Green CI with UNSURE stays open for a human.
+	gh2 := &fakeGH{prs: map[string]github.PR{}}
+	d2, a2, dir2 := newDaemonDir(t, gh2)
+	a2.verdict = "UNSURE"
+	dependabotPR(t, d2, gh2, dir2, "dep6", "SUCCESS", config.Soak)
+	d2.discoverDependabot(context.Background())
+	settle(t, d2)
+	if len(gh2.closed) != 0 || len(gh2.approved) != 0 {
+		t.Errorf("green and unsure: closed=%v approved=%v", gh2.closed, gh2.approved)
+	}
+}

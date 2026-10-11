@@ -101,9 +101,17 @@ func (d *Daemon) triageDependabot(ctx context.Context, ladder policy.Ladder, rep
 		d.startVerify(ctx, *r, pr)
 		return
 	}
-	switch verdict.Verdict {
-	case verifier.Fail:
-		comment := fmt.Sprintf("Closed by MARSHAL: the verifier failed head `%s`.\n\n%s\n\nDependabot will propose the next version when there is one; reopen this if you disagree.", short(verdict.Head), verdict.Summary)
+	// Broken is closed: a FAIL judgment, or red CI the verifier could not
+	// pass. A deterministic red flag on an update whose CI is green is a
+	// question for the operator, not a reason to close.
+	broken := verdict.Verdict == verifier.Fail || (verdict.Verdict != verifier.Pass && pr.Checks == "FAILURE")
+	switch {
+	case broken:
+		why := "the verifier failed head `" + short(verdict.Head) + "`"
+		if verdict.Verdict != verifier.Fail {
+			why = "its checks fail and the verifier did not pass head `" + short(verdict.Head) + "`"
+		}
+		comment := fmt.Sprintf("Closed by MARSHAL: %s.\n\n%s\n\nDependabot will propose the next version when there is one; reopen this if you disagree.", why, verdict.Summary)
 		if err := d.GH.ClosePR(ctx, r.PRURL, comment); err != nil {
 			d.fail("run %s: close: %v", r.ID, err)
 			return
@@ -112,10 +120,10 @@ func (d *Daemon) triageDependabot(ctx context.Context, ladder policy.Ladder, rep
 		// tick does not count it as the operator rejecting the class.
 		r.Status = store.Rejected
 		r.FinishedAt = d.now()
-		d.note(ctx, r.ID, "closed: verifier FAIL on %s", short(verdict.Head))
+		d.note(ctx, r.ID, "closed: %s", why)
 		d.send(ctx, notify.Event{Kind: notify.Failed, Title: r.Repo + ": closed a Dependabot PR", Body: firstLine(r.Summary) + " · " + firstLine(verdict.Summary), URL: r.PRURL})
 		return
-	case verifier.Pass:
+	case verdict.Verdict == verifier.Pass:
 	default:
 		return // UNSURE: labelled and notified when the verdict landed
 	}
