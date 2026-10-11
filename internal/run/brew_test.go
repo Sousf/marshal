@@ -31,7 +31,7 @@ func TestReadBrewFacts(t *testing.T) {
 		"go.mod":    "module x\n",
 		"main.go":   "package main\n\nvar version = \"dev\"\n\nfunc main() { if a == \"version\" {} }\n",
 		"LICENSE":   "MIT License\n",
-		"README.md": "# tool\n\n![demo](x.gif)\n\nA **small** tool that \"quotes\" things.\n",
+		"README.md": "# tool\n\n![demo](x.gif)\n\nA **small** tool that \"quotes\"\nthings. It wraps lines.\n",
 	})
 	f, err := ReadBrewFacts(root, "tool")
 	if err != nil {

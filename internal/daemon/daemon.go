@@ -32,6 +32,9 @@ import (
 // GitHub is what the daemon needs from GitHub, as an interface so tests can
 // script it.
 type GitHub interface {
+	DependabotPRs(ctx context.Context, slug string) ([]github.PR, error)
+	ApprovePR(ctx context.Context, url, body string) error
+	ClosePR(ctx context.Context, url, comment string) error
 	ViewPR(ctx context.Context, url string) (github.PR, error)
 	MergePR(ctx context.Context, url string) error
 	CommentPR(ctx context.Context, url, body string) error
@@ -79,6 +82,8 @@ type Daemon struct {
 	lastErr  string
 	// now is swapped in tests.
 	now func() time.Time
+	// scanned is when each repo was last asked for Dependabot PRs.
+	scanned map[string]time.Time
 	// guard wraps Adapter in the quota guard exactly once.
 	guard sync.Once
 }
@@ -267,6 +272,7 @@ func (d *Daemon) tick(ctx context.Context) {
 	if err := d.watchMerges(ctx); err != nil {
 		d.fail("watch: %v", err)
 	}
+	d.discoverDependabot(ctx)
 	d.maybeDigest(ctx)
 	d.announceHold(ctx)
 	if d.NoSchedule {
@@ -337,6 +343,8 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			r.Feedback = d.feedback(ctx, r)
 			d.note(ctx, r.ID, "closed without merging")
 			d.move(ctx, ladder, repo, r.Class, policy.Rejected)
+		case r.Job == DependabotJob:
+			d.triageDependabot(ctx, ladder, repo, &r, pr, autonomy)
 		default:
 			// A release PR is the operator's call, and its files are
 			// MARSHAL's own bookkeeping: no agent follows up on it.
@@ -384,25 +392,31 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 				d.Log.Printf("run %s: holding: verifier said %s", r.ID, verdict.Verdict)
 				continue
 			}
-			if err := d.GH.MergePR(ctx, r.PRURL); err != nil {
-				d.fail("run %s: merge: %v", r.ID, err)
-				continue
-			}
-			r.Status = store.Merged
-			r.MergedBy = by
-			r.FinishedAt = d.now()
-			if after, err := d.GH.ViewPR(ctx, r.PRURL); err == nil {
-				r.MergeSHA = after.MergeSHA
-			}
-			d.note(ctx, r.ID, "merged by marshal (%s); watching the default branch", by)
-			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("Merged by MARSHAL: class `%s` is at level `%s` for this repository, checks were green, the verifier passed head `%s`, and the %s gate passed. MARSHAL watches the default branch and reverts if it goes red.", r.Class, by, short(verdict.Head), by))
-			d.send(ctx, notify.Event{Kind: notify.Merged, Title: r.Repo + ": merged by MARSHAL (" + by + ")", Body: r.Job + " · " + firstLine(r.Summary), URL: r.PRURL})
+			d.merge(ctx, &r, by, verdict.Head)
 		}
 		if err := d.Store.UpdateRun(ctx, &r); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// merge merges a proposal every gate has passed and records it, so the
+// revert watch picks it up.
+func (d *Daemon) merge(ctx context.Context, r *store.Run, by, head string) {
+	if err := d.GH.MergePR(ctx, r.PRURL); err != nil {
+		d.fail("run %s: merge: %v", r.ID, err)
+		return
+	}
+	r.Status = store.Merged
+	r.MergedBy = by
+	r.FinishedAt = d.now()
+	if after, err := d.GH.ViewPR(ctx, r.PRURL); err == nil {
+		r.MergeSHA = after.MergeSHA
+	}
+	d.note(ctx, r.ID, "merged by marshal (%s); watching the default branch", by)
+	_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("Merged by MARSHAL: class `%s` is at level `%s` for this repository, checks were green, the verifier passed head `%s`, and the %s gate passed. MARSHAL watches the default branch and reverts if it goes red.", r.Class, by, short(head), by))
+	d.send(ctx, notify.Event{Kind: notify.Merged, Title: r.Repo + ": merged by MARSHAL (" + by + ")", Body: r.Job + " · " + firstLine(r.Summary), URL: r.PRURL})
 }
 
 // mayMerge applies every gate. It returns "auto" or "soak" when the PR may
@@ -954,6 +968,13 @@ func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
 		}
 		if res.Head == "" {
 			res.Head = pr.HeadSHA
+		}
+		if r.Job == DependabotJob && res.Verdict.Verdict == verifier.Fail && res.Checks.Fatal() {
+			// A FAIL closes a Dependabot PR. A deterministic red flag, such
+			// as a new module or a changed action, is not a judgment that
+			// the update is bad: a human decides those.
+			res.Verdict.Verdict = verifier.Unsure
+			res.Summary = "A deterministic check flagged this update, so a human decides. " + res.Summary
 		}
 		if err := d.Store.PutVerdict(bg, res.Verdict); err != nil {
 			d.fail("run %s: verdict: %v", r.ID, err)

@@ -725,3 +725,11 @@ func (s *Store) ListTrust(ctx context.Context) ([]Trust, error) {
 	}
 	return out, rows.Err()
 }
+
+// HasPR reports whether any run, in any state, is recorded against a pull
+// request URL.
+func (s *Store) HasPR(ctx context.Context, url string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM runs WHERE pr_url=?`, url).Scan(&n)
+	return n > 0, err
+}

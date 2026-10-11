@@ -51,6 +51,8 @@ type PR struct {
 	Body    string
 	// MergeSHA is the merge commit once merged.
 	MergeSHA string
+	// CreatedAt is when the PR was opened.
+	CreatedAt time.Time
 }
 
 // Merged reports whether the PR was merged.
@@ -459,4 +461,41 @@ func (c Client) gh(ctx context.Context, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("gh %s: %w: %s", strings.Join(args[:2], " "), err, bytes.TrimSpace(stderr.Bytes()))
 	}
 	return out, nil
+}
+
+// DependabotPRs lists the open pull requests Dependabot opened on slug.
+func (c Client) DependabotPRs(ctx context.Context, slug string) ([]PR, error) {
+	out, err := c.gh(ctx, "pr", "list", "--repo", slug, "--author", "app/dependabot", "--state", "open",
+		"--json", "number,url,title,headRefName,headRefOid,createdAt", "--limit", "50")
+	if err != nil {
+		return nil, err
+	}
+	var list []struct {
+		Number    int       `json:"number"`
+		URL       string    `json:"url"`
+		Title     string    `json:"title"`
+		HeadRef   string    `json:"headRefName"`
+		HeadSHA   string    `json:"headRefOid"`
+		CreatedAt time.Time `json:"createdAt"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, err
+	}
+	prs := make([]PR, 0, len(list))
+	for _, x := range list {
+		prs = append(prs, PR{URL: x.URL, Number: x.Number, State: "OPEN", Title: x.Title, HeadRef: x.HeadRef, HeadSHA: x.HeadSHA, CreatedAt: x.CreatedAt})
+	}
+	return prs, nil
+}
+
+// ApprovePR submits an approving review.
+func (c Client) ApprovePR(ctx context.Context, url, body string) error {
+	_, err := c.gh(ctx, "pr", "review", url, "--approve", "--body", body)
+	return err
+}
+
+// ClosePR closes a pull request with a comment saying why.
+func (c Client) ClosePR(ctx context.Context, url, comment string) error {
+	_, err := c.gh(ctx, "pr", "close", url, "--comment", comment)
+	return err
 }

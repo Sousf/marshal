@@ -126,6 +126,12 @@ policy:
     hardening:  {start: review, promote: 3, demote_on_reject: 1, demote_on_revert: 2, soak_hours: 24}
     dependency: {start: review, promote: 3, demote_on_reject: 1, demote_on_revert: 2, soak_hours: 24}
     code:       {start: review, promote: 5, demote_on_reject: 1, demote_on_revert: 2, soak_hours: 48}
+    # Dependabot's PRs. With this class present MARSHAL triages them: the
+    # verifier reads each head; FAIL closes it; PASS with green checks gets
+    # MARSHAL's approval, and merges once the level allows. Soak counts from
+    # when Dependabot opened the PR, so a release that turns out to be
+    # compromised has time to be yanked first.
+    dependabot: {start: soak, promote: 0, demote_on_revert: 2, soak_hours: 48}
     # Release PRs: prepared by MARSHAL without an agent, merged only by you.
     release:    {start: review, promote: 0}
     # Memory: skills and the operator profile. promote 0 means it never

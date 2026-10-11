@@ -169,6 +169,16 @@ Working today:
   login, and the private key goes from memory to the repo secret without
   touching disk.
 
+- Dependabot triage. With a `dependabot` class in the policy, MARSHAL
+  checks every repo for Dependabot PRs every 10 minutes and runs the
+  verifier on each head once CI has finished. FAIL closes the PR with the
+  reasons. UNSURE, or a deterministic red flag (a new module, a changed
+  Action), labels it for you. PASS with green checks gets MARSHAL's
+  approval, which satisfies a one-approval ruleset. It merges when the
+  class's level allows, behind the same gates as MARSHAL's own PRs: kill
+  switch, caps, `never:`, soak and revert watch. With `soak`, the window
+  counts from when Dependabot opened the PR.
+
 [SECURITY.md](SECURITY.md) is the trust model: what is a boundary, what is
 only a heuristic, and the gaps that remain until runs are isolated.
 

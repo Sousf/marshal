@@ -63,6 +63,11 @@ Rules the code enforces, which no change may weaken:
   `run/templates/`. `.github/workflows/release.yml` must equal the
   template rendered for master; a test checks. `marshal tap-key` runs with
   the operator's gh login, never the app's.
+- Dependabot PRs (`daemon/dependabot.go`) are proposals of job and class
+  `dependabot`. A verifier FAIL closes one without moving the ladder; a
+  FAIL that came from `Checks.Fatal` is downgraded to UNSURE first, so
+  only a judgment closes a PR and a red flag goes to a human. MARSHAL
+  approves only a PASS head with green checks.
 - See `SECURITY.md`: in-process checks are heuristics; only OS isolation
   is a boundary. Do not describe an allowlist as one.
 - No autonomous merge without a PASS verdict bound to the PR's current head.

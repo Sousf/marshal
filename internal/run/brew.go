@@ -145,15 +145,18 @@ func mainSource(dir string) string {
 	return b.String()
 }
 
-// readmeSummary is the README's first line of prose, which is untrusted
-// text: it is clipped, stripped to printable characters, and only ever
-// emitted as a quoted YAML string.
+// readmeSummary is the first sentence of the README's first paragraph of
+// prose, which is untrusted text: it is clipped, stripped to printable
+// characters, and only ever emitted as a quoted YAML string.
 func readmeSummary(dir, name string) string {
 	b, _ := os.ReadFile(filepath.Join(dir, "README.md"))
-	for _, l := range strings.Split(string(b), "\n") {
-		l = strings.TrimSpace(l)
+	for _, para := range strings.Split(string(b), "\n\n") {
+		l := strings.Join(strings.Fields(para), " ")
 		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, "!") || strings.HasPrefix(l, "[") || strings.HasPrefix(l, "<") || strings.HasPrefix(l, "```") {
 			continue
+		}
+		if i := strings.Index(l, ". "); i > 0 {
+			l = l[:i+1]
 		}
 		l = strings.Map(func(r rune) rune {
 			if r < 0x20 || r == 0x7f {
@@ -187,6 +190,11 @@ func brewReady(dir string) (goreleaserPath string, hasBrew, hasWorkflow bool) {
 	}
 	if b, err := os.ReadFile(filepath.Join(dir, releaseWorkflow)); err == nil {
 		hasWorkflow = bytes.Contains(b, []byte("paths: [VERSION]"))
+		// A workflow that writes its own formula, as a cgo tool's must,
+		// is a brew setup too.
+		if bytes.Contains(b, []byte("Formula/")) {
+			hasBrew = true
+		}
 	}
 	return
 }

@@ -33,6 +33,35 @@ type fakeGH struct {
 	commitCI     github.CI
 	commitCINone bool
 	created      []createdPR
+	// deps is what DependabotPRs returns; depCalls counts the calls.
+	deps     []github.PR
+	depCalls int
+	approved []string
+	closed   []string
+}
+
+func (g *fakeGH) DependabotPRs(context.Context, string) ([]github.PR, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.depCalls++
+	return g.deps, nil
+}
+
+func (g *fakeGH) ApprovePR(_ context.Context, url, _ string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.approved = append(g.approved, url)
+	return nil
+}
+
+func (g *fakeGH) ClosePR(_ context.Context, url, _ string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.closed = append(g.closed, url)
+	p := g.prs[url]
+	p.State = "CLOSED"
+	g.prs[url] = p
+	return nil
 }
 
 type createdPR struct{ slug, head, base, title string }
@@ -901,4 +930,95 @@ func TestNoFollowupsForUnknownJobs(t *testing.T) {
 	if a.calls != 0 || len(d.inFlight()) != 0 {
 		t.Errorf("follow-up started for a skill proposal: %d calls", a.calls)
 	}
+}
+
+// dependabotPR puts an open Dependabot PR with a real branch in the origin.
+func dependabotPR(t *testing.T, d *Daemon, gh *fakeGH, dir, url, checks string, level config.Level) {
+	t.Helper()
+	d.Fleet.Policy.Classes["dependabot"] = config.Class{Start: level, DemoteOnRevert: 2}
+	ref := "dependabot/go_modules/x-" + url
+	sha := branch(t, dir, ref)
+	pr := github.PR{URL: url, State: "OPEN", Checks: checks, HeadRef: ref, HeadSHA: sha, Title: "Bump x from 1 to 2", CreatedAt: time.Now().Add(-time.Hour)}
+	gh.mu.Lock()
+	gh.prs[url] = pr
+	gh.deps = append(gh.deps, pr)
+	gh.mu.Unlock()
+}
+
+func TestDependabotPassIsApprovedAndMerged(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.verdict = "PASS"
+	dependabotPR(t, d, gh, dir, "dep1", "SUCCESS", config.Auto)
+	d.discoverDependabot(ctx)
+	d.discoverDependabot(ctx) // within the scan interval: no second call
+	if gh.depCalls != 1 {
+		t.Errorf("dependabot listed %d times", gh.depCalls)
+	}
+	settle(t, d)
+	if len(gh.approved) != 1 || len(gh.merged) != 1 {
+		t.Fatalf("approved=%v merged=%v", gh.approved, gh.merged)
+	}
+	merged, _ := d.Store.ListByStatus(ctx, store.Merged)
+	if len(merged) != 1 || merged[0].Job != "dependabot" || merged[0].MergedBy != "auto" {
+		t.Errorf("merged runs: %+v", merged)
+	}
+	// Seen again later: never recorded twice.
+	d.scanned = nil
+	d.discoverDependabot(ctx)
+	if runs, _ := d.Store.ListRuns(ctx, "x", 0); len(runs) != 1 {
+		t.Errorf("runs = %d", len(runs))
+	}
+}
+
+func TestDependabotAtReviewIsApprovedNotMerged(t *testing.T) {
+	gh := &fakeGH{prs: map[string]github.PR{}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.verdict = "PASS"
+	dependabotPR(t, d, gh, dir, "dep2", "SUCCESS", config.Review)
+	d.discoverDependabot(context.Background())
+	settle(t, d)
+	settle(t, d)
+	if len(gh.approved) != 1 || len(gh.merged) != 0 {
+		t.Errorf("approved=%v merged=%v", gh.approved, gh.merged)
+	}
+}
+
+func TestDependabotFailIsClosedWithoutDemotion(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.verdict = "FAIL"
+	dependabotPR(t, d, gh, dir, "dep3", "SUCCESS", config.Soak)
+	d.discoverDependabot(ctx)
+	settle(t, d)
+	if len(gh.closed) != 1 || len(gh.merged) != 0 || len(gh.approved) != 0 {
+		t.Fatalf("closed=%v merged=%v approved=%v", gh.closed, gh.merged, gh.approved)
+	}
+	settle(t, d)
+	if got := level(t, d, "dependabot"); got != "soak" && got != "?" {
+		t.Errorf("closing on a verdict must not demote the class: %s", got)
+	}
+}
+
+func TestDependabotWaitsForCI(t *testing.T) {
+	gh := &fakeGH{prs: map[string]github.PR{}}
+	d, a, dir := newDaemonDir(t, gh)
+	a.verdict = "PASS"
+	dependabotPR(t, d, gh, dir, "dep4", "PENDING", config.Auto)
+	d.discoverDependabot(context.Background())
+	settle(t, d)
+	if v, ok, _ := d.Store.LatestVerdict(context.Background(), mustRun(t, d).ID); ok {
+		t.Errorf("verified while CI was pending: %+v", v)
+	}
+}
+
+func mustRun(t *testing.T, d *Daemon) store.Run {
+	t.Helper()
+	runs, _ := d.Store.ListRuns(context.Background(), "x", 0)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d", len(runs))
+	}
+	return runs[0]
 }
