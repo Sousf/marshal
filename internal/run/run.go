@@ -18,6 +18,7 @@ import (
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/jobs"
 	"github.com/Sousf/marshal/internal/policy"
+	"github.com/Sousf/marshal/internal/probe"
 	"github.com/Sousf/marshal/internal/runner"
 	"github.com/Sousf/marshal/internal/skills"
 	"github.com/Sousf/marshal/internal/store"
@@ -38,6 +39,8 @@ type Options struct {
 	// ID pre-assigns the run's identifier so a caller can hand it out before
 	// the run finishes. Empty means the store picks one.
 	ID string
+	// Force runs the agent even when the job's probe finds nothing to do.
+	Force bool
 }
 
 // Executor holds what every run needs.
@@ -159,6 +162,23 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		defer logf("note", "work tree kept at %s", ws.Dir)
 	}
 
+	if head, err := ws.HeadSHA(ctx); err == nil {
+		rec.Head = head
+	}
+	con, _, _ := contract.Load(ws.Dir)
+	if !opts.Force {
+		last, _, _ := x.Store.LastRunOf(ctx, job.Name, repo.Name)
+		pr := probe.Run(ctx, job.Name, probe.Env{Dir: ws.Dir, Contract: con, LastRun: last.StartedAt,
+			FeedbackSince: func(t time.Time) bool {
+				fb, err := x.Store.FeedbackSince(ctx, t, 1)
+				return err == nil && len(fb) > 0
+			}})
+		if !pr.Needed {
+			logf("note", "probe: nothing to do (%s); no agent run", pr.Reason)
+			return finish(store.Skipped, "probe: "+pr.Reason)
+		}
+		logf("note", "probe: %s", pr.Reason)
+	}
 	con, baseline := x.baseline(ctx, ws.Dir, logf)
 	prompt := brief
 	if c := con.Brief(baseline); c != "" {

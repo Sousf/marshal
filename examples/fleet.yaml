@@ -73,20 +73,33 @@ jobs:
   # (release workflows, signing config, key material). A job can be confined
   # with a paths: list of globs, but a confined job cannot fix what its own
   # change breaks elsewhere, so none of these are.
+  # Model and effort per job. Procedural jobs run on Sonnet at medium
+  # effort, which does the work at under half the cost; judgment-heavy
+  # jobs (ci-fix, follow-ups, tasks) keep the fleet default. A job's probe
+  # runs first: if it finds nothing to do, no agent is started at all.
   - name: onboard
-    description: add CI on pull requests, dependabot, and AGENTS.md where missing
+    description: add CI on pull requests, dependabot, AGENTS.md and a contract where missing
     schedule: manual
     class: hardening
+    model: claude-sonnet-5-5
+    effort: medium
+    max_turns: 30
     max_diff_lines: 400
   - name: posture-audit
     description: pin actions, tighten permissions, dependabot, govulncheck
     schedule: weekly
     class: hardening
+    model: claude-sonnet-5-5
+    effort: medium
+    max_turns: 30
     max_diff_lines: 400
   - name: vuln-fix
     description: fix what govulncheck reports
     schedule: daily
     class: dependency
+    model: claude-sonnet-5-5
+    effort: medium
+    max_turns: 30
     max_diff_lines: 800
   - name: ci-fix
     description: investigate and fix a red default branch
@@ -97,6 +110,8 @@ jobs:
     description: update the operator profile and skills from the week's reviewer feedback
     schedule: daily
     class: memory
+    model: claude-sonnet-5-5
+    effort: medium
     max_turns: 30
 
 policy:
@@ -116,8 +131,8 @@ policy:
   # It never sees the proposer's session. Set always: true to run it on every
   # PR and have its findings posted for your own review too.
   verifier:
-    model: claude-opus-5-5
-    effort: high
+    model: claude-sonnet-5-5
+    effort: medium
     max_turns: 25
     max_usd: 2.00
     always: false

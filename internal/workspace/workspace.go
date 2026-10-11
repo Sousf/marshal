@@ -190,6 +190,27 @@ func (w *Workspace) FileAt(ctx context.Context, rev, path string) string {
 	return out
 }
 
+// RemoteHead asks the remote for the tip of a branch without cloning. An
+// empty branch means the remote's HEAD.
+func RemoteHead(ctx context.Context, repo config.Repo, env []string) (string, error) {
+	w := &Workspace{Repo: repo, Env: env}
+	ref := repo.Branch
+	if ref == "" {
+		ref = "HEAD"
+	}
+	out, err := w.gitIn(ctx, "", "ls-remote", repo.URL, ref)
+	if err != nil {
+		return "", err
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 1 && len(f[0]) == 40 {
+			return f[0], nil
+		}
+	}
+	return "", fmt.Errorf("ls-remote %s %s: no such ref", repo.URL, ref)
+}
+
 // BranchName is marshal/<job>/<run>, so a glance at the branch list says
 // what made it and the run record is one lookup away.
 func BranchName(job, runID string) string {

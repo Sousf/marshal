@@ -30,6 +30,7 @@ const (
 	Committed Status = "committed" // committed on a local branch, no PR asked for
 	Pushed    Status = "pushed"    // follow-up pushed to an existing PR
 	Reported  Status = "reported"  // a task without a repo produced a report
+	Skipped   Status = "skipped"   // a probe found nothing to do, or the repo was unchanged
 	Proposed  Status = "proposed"  // PR opened, awaiting review or soak
 	Merged    Status = "merged"
 	Reverted  Status = "reverted" // merged by MARSHAL, then reverted by MARSHAL
@@ -73,6 +74,8 @@ type Run struct {
 	// Sensitive is set when the diff touched a path the repo's contract
 	// marks sensitive; such a proposal never merges without a human.
 	Sensitive bool
+	// Head is the default-branch commit the run started from.
+	Head string
 	// Summary is the agent's final report; the PR body.
 	Summary string
 	// Error explains Failed or Blocked.
@@ -139,6 +142,9 @@ func Open(path string) (*Store, error) {
 
 // Close closes the database.
 func (s *Store) Close() error { return s.db.Close() }
+
+// DB exposes the handle for tests and one-off maintenance.
+func (s *Store) DB() *sql.DB { return s.db }
 
 const schema = `
 CREATE TABLE IF NOT EXISTS runs (
@@ -210,6 +216,7 @@ func (s *Store) migrate() error {
 		`ALTER TABLE runs ADD COLUMN merge_sha TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE runs ADD COLUMN settled INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE runs ADD COLUMN sensitive INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE runs ADD COLUMN head TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			return err
@@ -253,8 +260,8 @@ func (s *Store) UpdateRun(ctx context.Context, r *Run) error {
 		fin = r.FinishedAt.Unix()
 	}
 	res, err := s.db.ExecContext(ctx, `UPDATE runs SET status=?, finished_at=?, turns=?,
-		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=?, feedback=?, merge_sha=?, settled=?, sensitive=? WHERE id=?`,
-		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.Feedback, r.MergeSHA, r.Settled, r.Sensitive, r.ID)
+		cost_usd=?, branch=?, pr_url=?, summary=?, error=?, merged_by=?, feedback=?, merge_sha=?, settled=?, sensitive=?, head=? WHERE id=?`,
+		r.Status, fin, r.Turns, r.CostUSD, r.Branch, r.PRURL, r.Summary, r.Error, r.MergedBy, r.Feedback, r.MergeSHA, r.Settled, r.Sensitive, r.Head, r.ID)
 	if err != nil {
 		return err
 	}
@@ -278,14 +285,14 @@ func (s *Store) AppendEvent(ctx context.Context, runID string, e Event) error {
 var ErrNotFound = errors.New("not found")
 
 const runCols = `id, job, repo, class, adapter, model, status, started_at, finished_at,
-	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head, feedback, merge_sha, settled, sensitive`
+	turns, cost_usd, branch, pr_url, summary, error, merged_by, parent, base_head, feedback, merge_sha, settled, sensitive, head`
 
 func scanRun(sc interface{ Scan(...any) error }) (Run, error) {
 	var r Run
 	var started int64
 	var finished sql.NullInt64
 	err := sc.Scan(&r.ID, &r.Job, &r.Repo, &r.Class, &r.Adapter, &r.Model, &r.Status,
-		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead, &r.Feedback, &r.MergeSHA, &r.Settled, &r.Sensitive)
+		&started, &finished, &r.Turns, &r.CostUSD, &r.Branch, &r.PRURL, &r.Summary, &r.Error, &r.MergedBy, &r.Parent, &r.BaseHead, &r.Feedback, &r.MergeSHA, &r.Settled, &r.Sensitive, &r.Head)
 	if err != nil {
 		return r, err
 	}
@@ -519,6 +526,16 @@ func (s *Store) Followups(ctx context.Context, parent string) ([]Run, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// LastRunOf returns the most recent run of a job on a repo, excluding
+// follow-ups; ok is false if there is none.
+func (s *Store) LastRunOf(ctx context.Context, job, repo string) (Run, bool, error) {
+	runs, err := s.ListByRepoJob(ctx, repo, job, 1)
+	if err != nil || len(runs) == 0 {
+		return Run{}, false, err
+	}
+	return runs[0], true, nil
 }
 
 // LastStarted returns when a job last started against a repo, or zero.

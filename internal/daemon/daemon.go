@@ -780,7 +780,7 @@ func (d *Daemon) DigestText(ctx context.Context) (string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d run(s), $%.2f", sum.Runs, sum.Spend)
 	var parts []string
-	for _, st := range []store.Status{store.Merged, store.Proposed, store.Pushed, store.NoChange, store.Rejected, store.Reverted, store.Failed, store.Blocked, store.Cancelled} {
+	for _, st := range []store.Status{store.Merged, store.Proposed, store.Pushed, store.Reported, store.NoChange, store.Skipped, store.Rejected, store.Reverted, store.Failed, store.Blocked, store.Cancelled} {
 		if n := sum.ByStatus[st]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, st))
 		}
@@ -958,6 +958,17 @@ func (d *Daemon) schedule(ctx context.Context) error {
 			if started {
 				continue
 			}
+			// An interval job on a repo whose default branch has not moved
+			// since the job last ran has nothing new to look at. Record the
+			// skip so the schedule advances, without cloning anything.
+			if !s.OnFailure && job.Class != "memory" {
+				if skipped, err := d.skipIfUnchanged(ctx, job, repo); err != nil {
+					d.fail("%s on %s: %v", job.Name, repo.Name, err)
+				} else if skipped {
+					started = true
+					break
+				}
+			}
 			if _, err := d.Trigger(ctx, job.Name, repo.Name); err != nil {
 				d.fail("%s on %s: %v", job.Name, repo.Name, err)
 				continue
@@ -970,6 +981,41 @@ func (d *Daemon) schedule(ctx context.Context) error {
 		d.Log.Printf("%d jobs due; starting one per tick", due)
 	}
 	return nil
+}
+
+// skipIfUnchanged records a skipped run when the remote head equals the
+// head the job last ran from. Returns true when it did.
+func (d *Daemon) skipIfUnchanged(ctx context.Context, job config.Job, repo config.Repo) (bool, error) {
+	last, ok, err := d.Store.LastRunOf(ctx, job.Name, repo.Name)
+	if err != nil || !ok || last.Head == "" {
+		return false, err
+	}
+	var env []string
+	cloneRepo := repo
+	if d.Auth != nil {
+		e, err := d.Auth.Env(ctx, ghapp.ReadOnly)
+		if err != nil {
+			return false, err
+		}
+		env = e
+		cloneRepo.URL = ghapp.CloneURL(repo)
+	}
+	head, err := workspace.RemoteHead(ctx, cloneRepo, env)
+	if err != nil {
+		return false, err
+	}
+	if head != last.Head {
+		return false, nil
+	}
+	rec := &store.Run{Job: job.Name, Repo: repo.Name, Class: job.Class, Adapter: d.Adapter.Name(), Status: store.Skipped, Head: head}
+	if err := d.Store.CreateRun(ctx, rec); err != nil {
+		return false, err
+	}
+	rec.Error = fmt.Sprintf("unchanged since run %s (%s)", last.ID, short(head))
+	rec.FinishedAt = d.now()
+	_ = d.Store.UpdateRun(ctx, rec)
+	d.Log.Printf("run %s: %s on %s skipped, %s", rec.ID, job.Name, repo.Name, rec.Error)
+	return true, nil
 }
 
 func (d *Daemon) defaultCI(ctx context.Context, repo config.Repo) (github.CI, error) {
@@ -1013,6 +1059,11 @@ func (d *Daemon) inFlight() []string {
 // Trigger starts a job against a repo in the background and returns the run
 // ID. A repo with a run in flight refuses a second.
 func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) {
+	return d.TriggerOpts(ctx, job, repo, false)
+}
+
+// TriggerOpts is Trigger with the probe bypassed when force is set.
+func (d *Daemon) TriggerOpts(ctx context.Context, job, repo string, force bool) (string, error) {
 	d.init()
 	if _, ok := d.Fleet.Job(job); !ok {
 		return "", fmt.Errorf("unknown job %q", job)
@@ -1037,12 +1088,14 @@ func (d *Daemon) Trigger(ctx context.Context, job, repo string) (string, error) 
 			delete(d.running, repo)
 			d.mu.Unlock()
 		}()
-		rec, err := x.Execute(d.base, job, repo, run.Options{ID: id})
+		rec, err := x.Execute(d.base, job, repo, run.Options{ID: id, Force: force})
 		if err != nil {
 			d.fail("run %s: %v", id, err)
 			return
 		}
 		switch rec.Status {
+		case store.Skipped:
+			d.Log.Printf("run %s: skipped: %s", id, rec.Error)
 		case store.Failed, store.Blocked, store.Cancelled:
 			d.Log.Printf("run %s: %s: %s", id, rec.Status, firstLine(rec.Error))
 			if rec.Status != store.Cancelled {
@@ -1205,7 +1258,7 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 		}
 		return api.Response{Run: &r, Events: ev}
 	case "trigger":
-		id, err := d.Trigger(ctx, req.Job, req.Repo)
+		id, err := d.TriggerOpts(ctx, req.Job, req.Repo, req.Value == "force")
 		if err != nil {
 			return api.Fail("%v", err)
 		}

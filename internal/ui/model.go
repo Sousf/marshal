@@ -424,6 +424,8 @@ func statusCell(s store.Status, spin string) string {
 		return sGood.Render("● pushed")
 	case store.Reported:
 		return sGood.Render("● reported")
+	case store.Skipped:
+		return sDim.Render("– skipped")
 	case store.NoChange:
 		return sDim.Render("○ no change")
 	case store.Failed:

@@ -261,3 +261,62 @@ func TestTasksTriggerAndSchedule(t *testing.T) {
 		t.Error("scheduled task recorded under task:<name>")
 	}
 }
+
+func TestScheduleSkipsUnchangedRepo(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{}, ci: github.CI{Status: "completed", Conclusion: "success"}}
+	d, a, dir := newDaemonDir(t, gh)
+	// First due run happens for real.
+	d.schedule(ctx)
+	wait(t, d)
+	a.mu.Lock()
+	first := a.calls
+	a.mu.Unlock()
+	if first != 1 {
+		t.Fatalf("first run: %d calls", first)
+	}
+	runs, _ := d.Store.ListRuns(ctx, "x", 0)
+	if len(runs[0].Head) != 40 {
+		t.Fatalf("head not recorded: %+v", runs[0])
+	}
+	// Make it due again by ageing the record; the repo has not moved.
+	if _, err := d.Store.DB().ExecContext(ctx, `UPDATE runs SET started_at = started_at - 200000`); err != nil {
+		t.Fatal(err)
+	}
+	d.schedule(ctx)
+	wait(t, d)
+	a.mu.Lock()
+	second := a.calls
+	a.mu.Unlock()
+	if second != first {
+		t.Error("unchanged repo should not spend an agent run")
+	}
+	runs, _ = d.Store.ListRuns(ctx, "x", 0)
+	if runs[0].Status != store.Skipped || !strings.Contains(runs[0].Error, "unchanged since") {
+		t.Errorf("skip not recorded: %+v", runs[0])
+	}
+	// A new commit on the origin makes the next due run real.
+	branchless(t, dir)
+	d.Store.DB().ExecContext(ctx, `UPDATE runs SET started_at = started_at - 200000`)
+	d.schedule(ctx)
+	wait(t, d)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.calls != first+1 {
+		t.Errorf("changed repo should run: %d calls", a.calls)
+	}
+}
+
+// branchless adds a commit to the origin's main.
+func branchless(t *testing.T, dir string) {
+	t.Helper()
+	os.WriteFile(filepath.Join(dir, "changed.txt"), []byte(time.Now().String()), 0o644)
+	for _, args := range [][]string{{"add", "."}, {"commit", "-q", "-m", "change"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+}

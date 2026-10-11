@@ -104,6 +104,15 @@ Working today:
   flip the kill switch, in conversation. It cannot edit files or use git or
   gh. The conversation resumes across openings; `--new` starts over.
 
+- Spend control. Before any agent starts, the job's probe checks the
+  checkout without a model: the contract's `vuln` verb or govulncheck for
+  vuln-fix, unpinned actions and missing permissions or Dependabot for
+  posture-audit, the baseline files for onboard, new feedback for reflect.
+  Nothing to do means no run and no cost, recorded as skipped. A scheduled
+  job on a repo whose default branch has not moved since it last ran is
+  skipped without even cloning. Procedural jobs default to Sonnet at
+  medium effort; `--force` runs the agent regardless of the probe.
+
 Not yet: `marshal doctor` for contract conformance and a posture score,
 adapters for agents other than Claude Code, a review screen in the
 interface, an inbound chat channel such as Telegram for dispatching from a

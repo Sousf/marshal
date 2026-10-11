@@ -196,6 +196,20 @@ func TestRevert(t *testing.T) {
 	}
 }
 
+func TestRemoteHead(t *testing.T) {
+	src := origin(t)
+	sha, err := RemoteHead(context.Background(), config.Repo{URL: src}, nil)
+	if err != nil || len(sha) != 40 {
+		t.Fatalf("%q %v", sha, err)
+	}
+	if got, _ := RemoteHead(context.Background(), config.Repo{URL: src, Branch: "main"}, nil); got != sha {
+		t.Error("explicit branch should match HEAD here")
+	}
+	if _, err := RemoteHead(context.Background(), config.Repo{URL: src, Branch: "nope"}, nil); err == nil {
+		t.Error("missing branch must fail")
+	}
+}
+
 func TestPrepareBadURL(t *testing.T) {
 	_, err := Prepare(context.Background(), t.TempDir(), config.Repo{Name: "x", URL: filepath.Join(t.TempDir(), "nope"), Branch: "main"}, "j", "r", config.Identity{}, nil)
 	if err == nil {

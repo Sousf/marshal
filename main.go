@@ -61,7 +61,8 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
   marshal run <job> <repo>        run a job here, in the foreground, and open a PR
       --no-pr                       commit on a local branch only, open nothing
       --keep                        leave the work tree on disk
-  marshal trigger <job> <repo>    ask the daemon to run a job in the background
+      --force                       run the agent even if the job's probe finds nothing to do
+  marshal trigger <job> <repo>    ask the daemon to run a job in the background (--force skips the probe)
   marshal fix <run-id>            ask the daemon to push a fix to that proposal's PR now, outside the cap
   marshal task "<instruction>"    run a free-form task via the daemon; --repo <name> ends in a PR, without it a report
   marshal verify <run-id>         run the verifier on a proposal here, in the foreground
@@ -720,10 +721,23 @@ func cmdStatus(ctx context.Context) error {
 }
 
 func cmdTrigger(ctx context.Context, args []string) error {
-	if len(args) != 2 {
-		return errors.New("usage: marshal trigger <job> <repo>")
+	force := false
+	var pos []string
+	for _, a := range args {
+		if a == "--force" {
+			force = true
+		} else {
+			pos = append(pos, a)
+		}
 	}
-	resp, err := client().Do(ctx, api.Request{Op: "trigger", Job: args[0], Repo: args[1]})
+	if len(pos) != 2 {
+		return errors.New("usage: marshal trigger <job> <repo> [--force]")
+	}
+	val := ""
+	if force {
+		val = "force"
+	}
+	resp, err := client().Do(ctx, api.Request{Op: "trigger", Job: pos[0], Repo: pos[1], Value: val})
 	if err != nil {
 		return err
 	}
@@ -849,6 +863,8 @@ func cmdRun(ctx context.Context, f *config.Fleet, args []string) error {
 			opts.NoPR = true
 		case "--keep":
 			opts.Keep = true
+		case "--force":
+			opts.Force = true
 		default:
 			if strings.HasPrefix(a, "-") {
 				return fmt.Errorf("unknown flag %q", a)
@@ -857,7 +873,7 @@ func cmdRun(ctx context.Context, f *config.Fleet, args []string) error {
 		}
 	}
 	if len(pos) != 2 {
-		return errors.New("usage: marshal run <job> <repo> [--no-pr] [--keep]")
+		return errors.New("usage: marshal run <job> <repo> [--no-pr] [--keep] [--force]")
 	}
 	st, err := openStore()
 	if err != nil {
