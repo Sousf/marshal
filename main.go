@@ -316,7 +316,10 @@ func cmdVerify(ctx context.Context, f *config.Fleet, args []string) error {
 	if err != nil {
 		return err
 	}
-	v := &verifier.Verifier{Fleet: f, Adapter: agent(f, st), WorkRoot: filepath.Join(config.StateDir(), "work"), Log: os.Stdout, Auth: app}
+	v := &verifier.Verifier{Fleet: f, Adapter: agent(f, st), WorkRoot: filepath.Join(config.StateDir(), "work"), Log: os.Stdout, Auth: app,
+		Event: func(kind, text string) {
+			_ = st.AppendEvent(ctx, r.ID, store.Event{Kind: kind, Text: "verifier: " + text})
+		}}
 	res, err := v.Verify(ctx, r, pr)
 	if err != nil {
 		return err

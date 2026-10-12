@@ -318,6 +318,11 @@ func (c *Contract) Brief(baseline []Result) string {
 	return b.String()
 }
 
+// CleanEnv is the process environment as a verb sees it: no credentials,
+// no host git config. Other harness commands that touch untrusted code or
+// the network use it too.
+func CleanEnv() []string { return scrub(os.Environ()) }
+
 func scrub(env []string) []string {
 	var out []string
 	for _, kv := range env {

@@ -21,8 +21,9 @@ RestartSec=30
 # The daemon's own state only. It clones into $MARSHAL_STATE/work.
 Environment=MARSHAL_CONFIG=%h/.config/marshal/fleet.yaml
 Environment=MARSHAL_STATE=%h/.local/share/marshal
-# gh, claude and go live under ~/.local/bin and ~/go/bin for a user install.
-Environment=PATH=%h/.local/bin:%h/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+# gh, claude and go live under ~/.local/bin and ~/go/bin for a user install,
+# or in Homebrew on Linux. The verifier runs go itself, so go must resolve.
+Environment=PATH=%h/.local/bin:%h/go/bin:/usr/local/go/bin:/home/linuxbrew/.linuxbrew/bin:/usr/local/bin:/usr/bin:/bin
 # Optional secrets for the service, e.g. ANTHROPIC_API_KEY=..., mode 600.
 EnvironmentFile=-%h/.config/marshal/env
 # gh and claude keep credentials under the home directory, so the home

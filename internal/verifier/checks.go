@@ -33,6 +33,12 @@ type Checks struct {
 	// Memory lists lines added to AGENTS.md that read as instructions
 	// rather than facts: the shape of a poisoned memory.
 	Memory []string
+	// ModuleFlags are capabilities a bumped module's new version gains.
+	ModuleFlags []string
+	// Unestablished lists what the harness could not establish: module
+	// source it could not compare, tests it could not run. Each makes a
+	// PASS an UNSURE.
+	Unestablished []string
 }
 
 // Findings converts the checks into findings.
@@ -54,7 +60,21 @@ func (c Checks) Findings() []Finding {
 		out = append(out, Finding{Category: "memory", Severity: "high", Source: "check",
 			Detail: "AGENTS.md gains a line that reads as an instruction to future agents, not a fact: " + s})
 	}
+	for _, s := range c.ModuleFlags {
+		out = append(out, Finding{Category: "safety", Severity: "medium", Source: "check",
+			Detail: "upstream module gains a capability: " + s})
+	}
+	for _, s := range c.Unestablished {
+		out = append(out, Finding{Category: "verification", Severity: "medium", Source: "check",
+			Detail: "not established by MARSHAL: " + s})
+	}
 	return out
+}
+
+// Unsure reports whether the checks rule out a PASS without ruling the
+// change bad: something a human has to read.
+func (c Checks) Unsure() bool {
+	return len(c.ModuleFlags) > 0 || len(c.Unestablished) > 0
 }
 
 // Fatal reports whether any check alone should fail the verdict.

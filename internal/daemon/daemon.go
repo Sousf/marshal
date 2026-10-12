@@ -995,8 +995,11 @@ func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
 	d.verifying[r.ID] = true
 	d.mu.Unlock()
 	d.note(ctx, r.ID, "verifying head %s", short(pr.HeadSHA))
-	v := &verifier.Verifier{Fleet: d.Fleet, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
 	bg := d.base
+	v := &verifier.Verifier{Fleet: d.Fleet, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth,
+		Event: func(kind, text string) {
+			_ = d.Store.AppendEvent(bg, r.ID, store.Event{Kind: kind, Text: "verifier: " + text})
+		}}
 	go func() {
 		defer func() {
 			d.mu.Lock()

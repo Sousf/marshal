@@ -72,6 +72,10 @@ func TestDecide(t *testing.T) {
 		{"pass with high finding", answer{Verdict: Pass, TestsRan: true, TestsPassed: true, Findings: []Finding{{Severity: "high"}}}, Checks{}, Fail},
 		{"check overrides pass", ok, Checks{NewModules: []string{"x"}}, Fail},
 		{"empty verdict", answer{}, Checks{}, Unsure},
+		{"upstream flag makes pass unsure", ok, Checks{ModuleFlags: []string{"m v2 imports os/exec"}}, Unsure},
+		{"unestablished makes pass unsure", ok, Checks{Unestablished: []string{"go test could not run"}}, Unsure},
+		{"unsure never softens a fail", answer{Verdict: Fail}, Checks{ModuleFlags: []string{"x"}}, Fail},
+		{"fatal outranks unsure", ok, Checks{NewModules: []string{"x"}, ModuleFlags: []string{"y"}}, Fail},
 	}
 	for _, c := range cases {
 		if got := decide(c.a, c.c); got != c.want {
@@ -250,5 +254,102 @@ func TestVerifyDefaultsWorkRoot(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(state, "work")); err != nil {
 		t.Errorf("checkout not under the state directory: %v", err)
+	}
+}
+
+// branch commits files onto the proposal branch of an origin and returns
+// the new head.
+func branch(t *testing.T, dir string, files map[string]string) string {
+	t.Helper()
+	git := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	git("checkout", "-q", "marshal/audit/r1")
+	for name, body := range files {
+		os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644)
+	}
+	git("add", ".")
+	git("commit", "-q", "-m", "more")
+	sha := git("rev-parse", "HEAD")
+	git("checkout", "-q", "main")
+	return sha
+}
+
+// A Go repository with no contract: the harness runs go test itself, and a
+// failing test beats the agent's claim that everything passed.
+func TestVerifyGoTestsRunByHarness(t *testing.T) {
+	url, _ := origin(t)
+	sha := branch(t, url, map[string]string{"a_test.go": "package x\n\nimport \"testing\"\n\nfunc TestBoom(t *testing.T) { t.Fatal(\"boom\") }\n"})
+	ad := &scripted{answer: `{"verdict":"PASS","summary":"fine","findings":[],"tests_ran":true,"tests_passed":true}`}
+	var events []string
+	v := &Verifier{Fleet: fleet(t, url), Adapter: ad, WorkRoot: t.TempDir(), Event: func(kind, text string) { events = append(events, kind+" "+text) }}
+	res, err := v.Verify(context.Background(), store.Run{ID: "r1", Job: "audit", Repo: "x"}, github.PR{HeadRef: "marshal/audit/r1", HeadSHA: sha})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verdict.Verdict != Fail {
+		t.Errorf("verdict = %s, want FAIL from the harness's go test", res.Verdict.Verdict)
+	}
+	log := strings.Join(events, "\n")
+	for _, want := range []string{"check harness test: FAIL", "check harness build: pass", "tool Bash go test ./..."} {
+		if !strings.Contains(log, want) {
+			t.Errorf("event log missing %q:\n%s", want, log)
+		}
+	}
+}
+
+// When the harness cannot run the tests, the agent saying it did is not
+// enough for a PASS.
+func TestVerifyUnrunnableTestsAreUnsure(t *testing.T) {
+	url, _ := origin(t)
+	sha := branch(t, url, map[string]string{"marshal.yaml": "contract: 1\nverbs:\n  test: 'exit 127'\n"})
+	ad := &scripted{answer: `{"verdict":"PASS","summary":"fine","findings":[],"tests_ran":true,"tests_passed":true}`}
+	v := &Verifier{Fleet: fleet(t, url), Adapter: ad, WorkRoot: t.TempDir()}
+	res, err := v.Verify(context.Background(), store.Run{ID: "r1", Job: "audit", Repo: "x"}, github.PR{HeadRef: "marshal/audit/r1", HeadSHA: sha})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verdict.Verdict != Unsure {
+		t.Errorf("verdict = %s, want UNSURE when go test could not run", res.Verdict.Verdict)
+	}
+}
+
+// A bump whose upstream source cannot be fetched is not judged.
+func TestVerifyBumpWithoutSourceIsUnsure(t *testing.T) {
+	t.Setenv("GOPROXY", "off")
+	t.Setenv("GOFLAGS", "-mod=mod")
+	url, _ := origin(t)
+	// The base must require the module too, so this is a bump and not a new
+	// module. Neither version exists; with the proxy off nothing is fetched.
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = url
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	os.WriteFile(filepath.Join(url, "go.mod"), []byte("module x\n\nrequire example.invalid/m v1.0.0\n"), 0o644)
+	git("commit", "-q", "-am", "require")
+	git("checkout", "-q", "marshal/audit/r1")
+	git("merge", "-q", "main")
+	git("checkout", "-q", "main")
+	sha := branch(t, url, map[string]string{"go.mod": "module x\n\nrequire example.invalid/m v1.0.1\n"})
+	ad := &scripted{answer: `{"verdict":"PASS","summary":"fine","findings":[],"tests_ran":true,"tests_passed":true}`}
+	v := &Verifier{Fleet: fleet(t, url), Adapter: ad, WorkRoot: t.TempDir()}
+	res, err := v.Verify(context.Background(), store.Run{ID: "r1", Job: "audit", Repo: "x"}, github.PR{HeadRef: "marshal/audit/r1", HeadSHA: sha})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Verdict.Verdict == Pass {
+		t.Errorf("verdict = PASS on a bump whose source was never compared")
+	}
+	if !strings.Contains(ad.req.Prompt, "example.invalid/m v1.0.0 -> v1.0.1") || !strings.Contains(ad.req.Prompt, "not compared") {
+		t.Errorf("brief should list the bump and why it was not compared:\n%s", ad.req.Prompt)
 	}
 }

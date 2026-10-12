@@ -192,6 +192,8 @@ func origin(t *testing.T) string {
 	}
 	git("init", "--quiet", "--initial-branch=main")
 	os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module x\n"), 0o644)
+	// A package, so the verifier's harness-run go test has one to test.
+	os.WriteFile(filepath.Join(dir, "x.go"), []byte("package x\n"), 0o644)
 	git("add", ".")
 	git("commit", "--quiet", "-m", "init")
 	return dir
