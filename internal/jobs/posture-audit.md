@@ -21,7 +21,20 @@ Checklist:
    module. Do not add new dependencies.
 5. **Secrets.** Run `gitleaks detect --no-git` if available, or grep for
    obvious key material. Report findings; do not rewrite history.
-6. **Release provenance.** If the repo publishes releases, note whether
+6. **Personal information (PII).** Look through tracked files, test
+   fixtures, sample data, logs and docs for real people's details: email
+   addresses, phone numbers, postal addresses, national ID or social
+   security numbers, payment card numbers, dates of birth. Treat anything
+   else an attacker could use the same way: IP addresses, internal
+   hostnames and URLs, usernames and account IDs, and details of private
+   infrastructure. Replace these in fixtures and examples with reserved
+   placeholders (`user@example.com`, `*.invalid`, 555-01xx phone numbers,
+   documented test card numbers, `192.0.2.0/24` and `2001:db8::/32`
+   addresses) and keep the tests passing. Leave contact
+   details a maintainer published on purpose (LICENSE, CODEOWNERS,
+   SECURITY.md, package author fields) alone. Report PII in git history or
+   in files you cannot safely edit; do not rewrite history.
+7. **Release provenance.** If the repo publishes releases, note whether
    artifacts are signed or attested. Report only; release workflows are
    locked and you must not edit them.
 

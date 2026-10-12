@@ -92,7 +92,7 @@ jobs:
     max_turns: 30
     max_diff_lines: 400
   - name: posture-audit
-    description: pin actions, tighten permissions, dependabot, govulncheck
+    description: pin actions, tighten permissions, dependabot, govulncheck, PII
     schedule: weekly
     class: hardening
     model: claude-sonnet-5-5

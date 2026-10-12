@@ -237,9 +237,9 @@ cacheable prefix.
 ## Spend
 
 Probes run before any agent: the contract's `vuln` verb or govulncheck for
-`vuln-fix`, unpinned actions and missing permissions or Dependabot for
-`posture-audit`, the baseline files for `onboard`, new feedback for
-`reflect`. A scheduled job on a repo whose default branch has not moved
+`vuln-fix`, unpinned actions, missing permissions or Dependabot, and
+likely PII (real email addresses, SSNs, card numbers) for `posture-audit`,
+the baseline files for `onboard`, new feedback for `reflect`. A scheduled job on a repo whose default branch has not moved
 since its last run is skipped without cloning. Procedural jobs default to
 Sonnet at medium effort. `--force` runs the agent regardless of the probe.
 
