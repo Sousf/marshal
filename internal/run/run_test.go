@@ -167,6 +167,10 @@ func TestSplitReport(t *testing.T) {
 	if len(title) != 70 {
 		t.Errorf("title length %d", len(title))
 	}
+	title, _ = splitReport("I rewrote `README.md` against the code and the write-docs skill, and checked every command", "j")
+	if title != "I rewrote `README.md` against the code and the write-docs skill..." {
+		t.Errorf("a long title is cut at a word: %q", title)
+	}
 	title, body = splitReport("NO CHANGE: but actually I did\n\nReal title\n\nReal body", "j")
 	if title != "Real title" || body != "Real body" {
 		t.Errorf("NO CHANGE line should be dropped when the tree changed: %q %q", title, body)
