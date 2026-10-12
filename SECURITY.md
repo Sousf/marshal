@@ -73,7 +73,9 @@ a prompt. It is never interpolated into a shell command.
 
 ## Known gaps today
 
-1. **No per-run isolation.** The agent, the repository's own tests and the
+1. **No per-run isolation by default.** Without `isolation.mode: bwrap` in
+   the fleet file (see "What the sandbox closes" below), the agent, the
+   repository's own tests and the
    pre-flight checks (`go test`, the contract's verbs, derived CI commands)
    all run as the daemon's OS user, with that user's home directory and
    network. Code in a repository or in one of its dependencies, or an agent
@@ -112,16 +114,47 @@ Until per-run isolation lands:
 - Treat a skill or memory pull request like a change to every repository at
   once. That is what it is.
 
-## The plan for real isolation
+## What the sandbox closes
 
-Each agent run and each pre-flight check runs in its own sandbox. That
-means a separate uid, or bubblewrap / `systemd-run` with `ProtectHome`, a
-private `/tmp` and a read-only root. The only writable path is the run's
-own clone. Network goes through an allowlist proxy (the module proxy,
-GitHub's API read-only, the model API). The app key moves into a separate
-signer process that mints tokens on request and never shares the file.
-When that lands, the tool allowlists become what they are named for, and
-gaps 1 and 3 close. Gap 2 then depends only on the signer.
+With `isolation.mode: bwrap`, every agent invocation (`runner.Claude`, so
+jobs, tasks, follow-ups, the verifier and the skill nudge) and every
+contract verb (baseline, pre-flight, the verifier's runs) runs under
+bubblewrap. `internal/sandbox` holds the mount layout. Inside:
+
+- The root filesystem is read-only. The home directory, MARSHAL's config
+  and state directories and `$XDG_RUNTIME_DIR` are empty tmpfs mounts, and
+  the fleet file and app key are masked wherever they live. The database,
+  the daemon socket, other runs' clones, ssh keys and a `gh` login are out
+  of reach.
+- The run's clone is writable and its `.git` is read-only, so a run cannot
+  plant a hook or a `core.fsmonitor` that the harness's own git, which runs
+  outside the sandbox with the write token, would execute.
+- Its own pid, ipc, uts and user namespaces, a private `/tmp`, a new
+  session, and death with the daemon.
+
+What stays open:
+
+- **Network.** The sandbox shares the host network (gap 3).
+- **Claude credentials.** `~/.claude` is bound read-write for the agent,
+  since an OAuth login refreshes its token there. An agent can read it,
+  and anything it writes there persists.
+- **Shared caches.** The Go build and module caches are read-write and
+  shared between runs, so one run can poison what a later one compiles.
+- **Harness-side tools.** `go mod download` and `go list` in the verifier,
+  `govulncheck` in the probe and `go build` in brew setup run outside the
+  sandbox. They read untrusted repositories but do not execute their code.
+- **Chat.** `marshal chat` runs claude unsandboxed in the operator's
+  terminal.
+- The process runs as the same uid. A kernel bug in user namespaces is a
+  way out; a separate uid would add a second layer.
+
+## The plan for the rest
+
+Network goes through an allowlist proxy (the module proxy, GitHub's API
+read-only, the model API). The app key moves into a separate signer process
+that mints tokens on request and never shares the file. Per-run copies of
+`~/.claude` and the caches end the cross-run persistence above. When those
+land, gap 3 closes and gap 2 depends only on the signer.
 
 ## Floors that only get stricter
 

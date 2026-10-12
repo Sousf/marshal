@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Sousf/marshal/internal/sandbox"
 	"gopkg.in/yaml.v3"
 )
 
@@ -209,6 +210,7 @@ func (c *Contract) run(ctx context.Context, dir, verb, cmd string) Result {
 	sh.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	sh.Cancel = func() error { return syscall.Kill(-sh.Process.Pid, syscall.SIGKILL) }
 	sh.WaitDelay = 5 * time.Second
+	sandbox.Current().Wrap(sh, nil, nil)
 	var out tail
 	sh.Stdout = &out
 	sh.Stderr = &out

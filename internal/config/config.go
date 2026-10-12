@@ -65,6 +65,8 @@ type Fleet struct {
 	// Never is the deny floor. Nothing a job, task, chat, contract or trust
 	// level says can lift it.
 	Never Never `yaml:"never"`
+	// Isolation sandboxes the agent and the contract verbs.
+	Isolation Isolation `yaml:"isolation"`
 	// Homebrew, when set, makes onboarding check that each Go repo
 	// releases to this tap, and propose the wiring when it does not.
 	Homebrew Homebrew `yaml:"homebrew"`
@@ -191,6 +193,32 @@ type Never struct {
 	// "*/deps", that never merge without a human.
 	AutoMerge []string `yaml:"auto_merge"`
 }
+
+// Isolation is how agent runs and contract verbs are kept away from the
+// daemon user's files. Mode "bwrap" runs each under bubblewrap with the home
+// directory, MARSHAL's config and state, and the app key hidden; MARSHAL
+// refuses to start when bubblewrap does not work. Empty or "none" runs them
+// as the daemon's user, as before.
+type Isolation struct {
+	Mode string `yaml:"mode"`
+	// ReadOnly are extra host paths under a hidden directory that runs
+	// need, such as a toolchain in the home directory.
+	ReadOnly []string `yaml:"read_only"`
+	// Writable are extra caches shared read-write between runs.
+	Writable []string `yaml:"writable"`
+}
+
+// ExpandHome turns a leading "~/" into $HOME, as the fleet file's paths
+// are written.
+func ExpandHome(p string) string {
+	if strings.HasPrefix(p, "~/") {
+		return filepath.Join(os.Getenv("HOME"), p[2:])
+	}
+	return p
+}
+
+// On reports whether runs are sandboxed.
+func (i Isolation) On() bool { return i.Mode == "bwrap" }
 
 // HoldsMerge reports whether the floor forbids merging a repo's class
 // without a human.
@@ -619,6 +647,16 @@ func (f *Fleet) validate() error {
 	for _, t := range f.Never.Tools {
 		if strings.TrimSpace(t) == "" {
 			errs = append(errs, errors.New("never.tools: empty entry"))
+		}
+	}
+	switch f.Isolation.Mode {
+	case "", "none", "bwrap":
+	default:
+		errs = append(errs, fmt.Errorf("isolation.mode: want bwrap or none, got %q", f.Isolation.Mode))
+	}
+	for _, p := range append(append([]string{}, f.Isolation.ReadOnly...), f.Isolation.Writable...) {
+		if !filepath.IsAbs(ExpandHome(p)) {
+			errs = append(errs, fmt.Errorf("isolation: %q is not an absolute path", p))
 		}
 	}
 	if g := f.GitHubApp; g.Set() && (g.AppID == 0 || g.InstallationID == 0 || g.PrivateKeyFile == "") {

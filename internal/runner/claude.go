@@ -8,9 +8,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Sousf/marshal/internal/sandbox"
 )
 
 // Claude runs Claude Code in headless mode and parses its stream-json output.
@@ -36,6 +39,33 @@ func (c Claude) binary() string {
 		return c.Binary
 	}
 	return "claude"
+}
+
+// binaryDirs are what a sandboxed run must see of the claude executable when
+// it is installed in the hidden home directory: the PATH entry and the
+// versioned directory its symlink points into.
+func binaryDirs(bin string) []string {
+	if !filepath.IsAbs(bin) {
+		return nil
+	}
+	dirs := []string{filepath.Dir(bin)}
+	if real, err := filepath.EvalSymlinks(bin); err == nil && filepath.Dir(real) != dirs[0] {
+		dirs = append(dirs, filepath.Dir(real))
+	}
+	return dirs
+}
+
+// claudeHome is the login the agent runs under. It stays writable because an
+// OAuth login refreshes its token there. That leaves the Claude credentials
+// readable by the agent; the sandbox keeps everything else of the user's out.
+func claudeHome() []string {
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		return []string{d}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return []string{filepath.Join(home, ".claude")}
+	}
+	return nil
 }
 
 // Args builds the command line for a request. Exposed so a dry run can show
@@ -108,6 +138,7 @@ func (c Claude) Run(ctx context.Context, req Request, emit func(Event)) (Result,
 	// Connectors come from the login rather than any config file, so the
 	// flag alone may not keep them out.
 	cmd.Env = append(append(os.Environ(), req.Env...), "ENABLE_CLAUDEAI_MCP_SERVERS=false")
+	sandbox.Current().Wrap(cmd, append(binaryDirs(cmd.Path), req.ExtraDirs...), claudeHome())
 	// Stderr carries MCP connection chatter and the occasional real error.
 	// Keep the last few lines for the failure message rather than dropping
 	// them, which is what the first version of this did and regretted.

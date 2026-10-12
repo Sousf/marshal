@@ -423,6 +423,32 @@ For auto-merge under branch protection that requires reviews, add the app
 to the rule's bypass list. The ladder, the verifier, green CI and the caps
 still apply.
 
+## Sandbox runs
+
+Install bubblewrap (`apt install bubblewrap`), then add to the fleet file:
+
+```yaml
+isolation:
+  mode: bwrap
+  read_only: []   # extra paths under $HOME a run needs, e.g. ~/sdk/go1.24
+  writable: []    # extra caches shared between runs
+```
+
+Check it with `marshal check`, which prints an `isolation:` line. With
+`mode: bwrap`, MARSHAL refuses to start if bubblewrap cannot create a
+sandbox on this host. If that happens on a recent Ubuntu, the usual cause
+is AppArmor's restriction on unprivileged user namespaces
+(`kernel.apparmor_restrict_unprivileged_userns`).
+
+Each agent run and each contract verb then sees the host read-only, with
+your home directory, MARSHAL's config and state directories,
+`$XDG_RUNTIME_DIR`, the fleet file and the app key replaced by empty
+mounts. Writable: the run's clone (its `.git` stays read-only), a private
+`/tmp`, and the Go build and module caches. Read-only holes: PATH entries
+under `$HOME`, `GOROOT`, the claude binary, and the memory repo's skills.
+The agent also gets `~/.claude` read-write, because that is where its login
+lives and refreshes. Network is not restricted yet; see `SECURITY.md`.
+
 ## Testing without spending
 
 `go test ./...` runs with no network and no `claude`. Everything that
