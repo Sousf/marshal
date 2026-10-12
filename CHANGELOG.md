@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.1.5 (2026-10-12)
+
+- MARSHAL_HOST works with the default socket path: resolve it against the remote home
+- Skill: Go dead-code and inefficiency scan, with an agent pass for free optimisations (#11)
+
 ## v0.1.4 (2026-10-11)
 
 - Act on any reply to a MARSHAL PR, and always answer
