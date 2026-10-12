@@ -32,7 +32,7 @@ func TestParseRenderRoundTrip(t *testing.T) {
 	if err != nil || again.Body != s.Body || again.LearnedFrom != s.LearnedFrom {
 		t.Errorf("round trip: %v %+v", err, again)
 	}
-	for _, bad := range []string{"no frontmatter", "---\nname: x\n---\nbody", "---\nname: x\ndescription: y\n" + strings.Repeat("z", 10) + "\n", "---\nname: x\ndescription: y\n---\n" + strings.Repeat("b", MaxBody+1)} {
+	for _, bad := range []string{"no frontmatter", "---\nname: x\n---\nbody", "---\nname: x\ndescription: y\n" + strings.Repeat("z", 10) + "\n", "---\nname: x\ndescription: y\n---\n" + strings.Repeat("b", MaxLibraryBody+1)} {
 		if _, err := Parse("bad", []byte(bad)); err == nil {
 			t.Errorf("should fail: %q", bad[:20])
 		}
@@ -124,5 +124,27 @@ func TestCapClipsOnLinesAndPointsAtTheRest(t *testing.T) {
 	l := &Library{Operator: long}
 	if b := l.Brief(nil, "/m"); len(b) > OperatorCap+400 {
 		t.Errorf("operator section uncapped: %d bytes", len(b))
+	}
+}
+
+// The operator's own long skills load and can be edited in place; a
+// proposal written into a run's report stays short.
+func TestLongSkills(t *testing.T) {
+	long := "---\nname: Write docs\ndescription: d\nlicense: MIT\nmetadata:\n  tags: \"writing\"\n---\n\n" + strings.Repeat("1. Cut the padding.\n", 1000)
+	s, err := Parse("write-docs/SKILL.md", []byte(long))
+	if err != nil {
+		t.Fatalf("a %d-byte skill with extra frontmatter should load: %v", len(long), err)
+	}
+	if r := Check(s); len(r) != 0 {
+		t.Errorf("an edit to a long library skill is within bounds: %v", r)
+	}
+	if r := CheckProposal(s); len(r) == 0 {
+		t.Error("a report-sized proposal must stay under MaxBody")
+	}
+	if r := CheckProposal(Skill{Name: "n", Description: "d", Body: "1. Run go test ./..."}); len(r) != 0 {
+		t.Errorf("short proposal refused: %v", r)
+	}
+	if r := Check(Skill{Name: "n", Description: "d", Body: strings.Repeat("x", MaxLibraryBody+1)}); len(r) == 0 {
+		t.Error("the library cap still holds")
 	}
 }

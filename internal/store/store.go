@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS events (
 	text TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS events_run ON events(run_id, seq);
+CREATE INDEX IF NOT EXISTS events_revision ON events(at) WHERE kind='skill-revision';
 CREATE TABLE IF NOT EXISTS trust (
 	repo TEXT NOT NULL,
 	class TEXT NOT NULL,
@@ -644,6 +645,37 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?,?)
 		ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	return err
+}
+
+// SkillRevision is the event kind for a correction a run proposed to a skill
+// too long for its report to replace. The reflect job reads them.
+const SkillRevision = "skill-revision"
+
+// RunEvent is an event with the run it belongs to.
+type RunEvent struct {
+	RunID string
+	Event
+}
+
+// SkillRevisionsSince returns skill revisions logged after t, newest first.
+func (s *Store) SkillRevisionsSince(ctx context.Context, since time.Time, limit int) ([]RunEvent, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT run_id, seq, at, kind, text FROM events
+		WHERE kind='skill-revision' AND at>=? ORDER BY at DESC LIMIT ?`, since.UnixMilli(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []RunEvent
+	for rows.Next() {
+		var e RunEvent
+		var at int64
+		if err := rows.Scan(&e.RunID, &e.Seq, &at, &e.Kind, &e.Text); err != nil {
+			return nil, err
+		}
+		e.At = time.UnixMilli(at)
+		out = append(out, e)
+	}
+	return out, rows.Err()
 }
 
 // Events returns a run's log in order.

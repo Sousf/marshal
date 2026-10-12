@@ -10,3 +10,9 @@ A skill is a directory with a `SKILL.md`: YAML frontmatter with `name`,
 Proposals come from runs that end their report with `## Skill: <name>`.
 Content that pipes downloads to a shell, handles credentials, or weakens a
 check is refused before a pull request is opened.
+
+`write-docs` and `i-have-adhd` are the operator's own skills, copied in
+from their Claude Code setup and kept separate from it from then on. A
+skill longer than a page cannot be replaced from a run's report; runs that
+find one wrong leave a correction, and the daily `reflect` job edits the
+skill in place. Every change still arrives as a pull request.

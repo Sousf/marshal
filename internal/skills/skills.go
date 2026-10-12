@@ -57,9 +57,14 @@ func Slugify(name string) string {
 	return strings.Trim(b.String(), "-")
 }
 
-// MaxBody bounds a skill so the library stays a set of procedures, not a
-// dumping ground for transcripts.
+// MaxBody bounds a skill a run proposes in its report, so what MARSHAL
+// learns stays a set of procedures, not a dumping ground for transcripts.
 const MaxBody = 6000
+
+// MaxLibraryBody bounds any skill in the library. The operator's own skills
+// run longer than a run may write; a brief only ever carries SkillCap bytes
+// of one, and the agent reads the rest from the mounted file.
+const MaxLibraryBody = 32 << 10
 
 // Parse reads a SKILL.md: YAML frontmatter between --- lines, then Markdown.
 func Parse(path string, b []byte) (Skill, error) {
@@ -81,8 +86,8 @@ func Parse(path string, b []byte) (Skill, error) {
 	if s.Name == "" || s.Description == "" {
 		return Skill{}, fmt.Errorf("%s: name and description are required", path)
 	}
-	if len(s.Body) > MaxBody {
-		return Skill{}, fmt.Errorf("%s: body is %d bytes, cap is %d", path, len(s.Body), MaxBody)
+	if len(s.Body) > MaxLibraryBody {
+		return Skill{}, fmt.Errorf("%s: body is %d bytes, cap is %d", path, len(s.Body), MaxLibraryBody)
 	}
 	return s, nil
 }
@@ -162,6 +167,16 @@ func Check(s Skill) []string {
 	if strings.Count(s.Body, "http") > 5 {
 		out = append(out, "too many URLs for a procedure")
 	}
+	if len(s.Body) > MaxLibraryBody {
+		out = append(out, fmt.Sprintf("body over %d bytes", MaxLibraryBody))
+	}
+	return out
+}
+
+// CheckProposal is Check for a skill a run wrote into its report, which is
+// held to the shorter MaxBody.
+func CheckProposal(s Skill) []string {
+	out := Check(s)
 	if len(s.Body) > MaxBody {
 		out = append(out, fmt.Sprintf("body over %d bytes", MaxBody))
 	}

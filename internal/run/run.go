@@ -203,7 +203,11 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		pr := probe.Run(ctx, job.Name, probe.Env{Dir: ws.Dir, Contract: con, LastRun: last.StartedAt,
 			FeedbackSince: func(t time.Time) bool {
 				fb, err := x.Store.FeedbackSince(ctx, t, 1)
-				return err == nil && len(fb) > 0
+				if err == nil && len(fb) > 0 {
+					return true
+				}
+				rv, err := x.Store.SkillRevisionsSince(ctx, t, 1)
+				return err == nil && len(rv) > 0
 			}})
 		if !pr.Needed {
 			logf("note", "probe: nothing to do (%s); no agent run", pr.Reason)
@@ -228,7 +232,11 @@ func (x *Executor) executeJob(ctx context.Context, job config.Job, repo config.R
 		prompt += "\n" + h
 	}
 	if job.Class == "memory" {
-		prompt += "\n" + fleetFeedback(ctx, x.Store, time.Now().Add(-7*24*time.Hour))
+		week := time.Now().Add(-7 * 24 * time.Hour)
+		prompt += "\n" + fleetFeedback(ctx, x.Store, week)
+		if r := skillRevisions(ctx, x.Store, week); r != "" {
+			prompt += "\n" + r
+		}
 	}
 	req := runner.Request{
 		Prompt:          prompt,
