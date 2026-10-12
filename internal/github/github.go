@@ -178,6 +178,16 @@ func (c Client) CreatePR(ctx context.Context, slug, head, base, title, body stri
 	return strings.TrimSpace(string(out)), nil
 }
 
+// RequestReview asks reviewers, GitHub logins or org/team, to review a
+// pull request.
+func (c Client) RequestReview(ctx context.Context, url string, reviewers []string) error {
+	if len(reviewers) == 0 {
+		return nil
+	}
+	_, err := c.gh(ctx, "pr", "edit", url, "--add-reviewer", strings.Join(reviewers, ","))
+	return err
+}
+
 // CommentPR posts a comment.
 func (c Client) CommentPR(ctx context.Context, url, body string) error {
 	_, err := c.gh(ctx, "pr", "comment", url, "--body", body)

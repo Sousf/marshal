@@ -201,3 +201,23 @@ never:
 		t.Error("a malformed pattern must not load")
 	}
 }
+
+func TestReviewers(t *testing.T) {
+	src := strings.Replace(good, "  model: m\n", "  model: m\n  reviewers: [Sousf]\n", 1)
+	src = strings.Replace(src, "repos:\n", "repos:\n  - {name: b, url: u2, jobs: [j1], reviewers: [someone-else, Sousf/maintainers]}\n", 1)
+	f, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, _ := f.Repo("a"); strings.Join(a.Reviewers, ",") != "Sousf" {
+		t.Errorf("a inherits the default reviewers: %v", a.Reviewers)
+	}
+	if b, _ := f.Repo("b"); strings.Join(b.Reviewers, ",") != "someone-else,Sousf/maintainers" {
+		t.Errorf("b overrides them: %v", b.Reviewers)
+	}
+	for _, bad := range []string{"--admin", "a b", "x;y", "-lead", "o/t/z"} {
+		if _, err := Parse([]byte(strings.Replace(good, "  model: m\n", "  model: m\n  reviewers: [\""+bad+"\"]\n", 1))); err == nil {
+			t.Errorf("reviewer %q should be refused", bad)
+		}
+	}
+}

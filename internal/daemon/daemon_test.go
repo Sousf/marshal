@@ -34,6 +34,8 @@ type fakeGH struct {
 	commitCI     github.CI
 	commitCINone bool
 	created      []createdPR
+	// reviewRequests records "url reviewers" per RequestReview call.
+	reviewRequests []string
 	// deps is what DependabotPRs returns; depCalls counts the calls.
 	deps     []github.PR
 	depCalls int
@@ -131,6 +133,13 @@ func (g *fakeGH) CommitCI(context.Context, string, string) (github.CI, bool, err
 	}
 	return g.commitCI, true, nil
 }
+func (g *fakeGH) RequestReview(_ context.Context, url string, reviewers []string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.reviewRequests = append(g.reviewRequests, url+" "+strings.Join(reviewers, ","))
+	return nil
+}
+
 func (g *fakeGH) CreatePR(_ context.Context, slug, head, base, title, body string, labels []string) (string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()

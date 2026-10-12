@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -242,6 +243,9 @@ type Identity struct {
 
 // Defaults apply to every job unless the job overrides them.
 type Defaults struct {
+	// Reviewers are requested on every pull request MARSHAL opens: GitHub
+	// logins, or org/team. A repo's own list replaces them.
+	Reviewers       []string `yaml:"reviewers"`
 	Model           string   `yaml:"model"`
 	Effort          string   `yaml:"effort"`
 	MaxTurns        int      `yaml:"max_turns"`
@@ -266,6 +270,8 @@ type Repo struct {
 	// A brand new repo joins at review regardless of what it has earned
 	// elsewhere, and this is how you say so without touching the policy.
 	Trust map[string]Level `yaml:"trust"`
+	// Reviewers replaces defaults.reviewers for this repo.
+	Reviewers []string `yaml:"reviewers"`
 }
 
 // Job is one kind of work the agent does against a repo.
@@ -505,8 +511,18 @@ func (f *Fleet) validate() error {
 			errs = append(errs, fmt.Errorf("job %q: prompt and prompt_file are exclusive", j.Name))
 		}
 	}
+	for _, l := range f.Defaults.Reviewers {
+		if !reviewerRE.MatchString(l) {
+			errs = append(errs, fmt.Errorf("defaults.reviewers: %q is not a GitHub login or org/team", l))
+		}
+	}
 	repos := map[string]bool{}
 	for i, r := range f.Repos {
+		for _, l := range r.Reviewers {
+			if !reviewerRE.MatchString(l) {
+				errs = append(errs, fmt.Errorf("repo %q: reviewers: %q is not a GitHub login or org/team", r.Name, l))
+			}
+		}
 		switch {
 		case r.Name == "":
 			errs = append(errs, fmt.Errorf("repos[%d]: name is required", i))
@@ -596,7 +612,16 @@ func (f *Fleet) Repo(name string) (Repo, bool) {
 // empty: the workspace asks the remote for its default branch, which is
 // right for every repo, where guessing "main" was wrong for the first one
 // tried.
-func (f *Fleet) fillRepo(r Repo) Repo { return r }
+func (f *Fleet) fillRepo(r Repo) Repo {
+	if len(r.Reviewers) == 0 {
+		r.Reviewers = f.Defaults.Reviewers
+	}
+	return r
+}
+
+// reviewerRE is a GitHub login or an org/team slug. They become gh
+// arguments, so nothing that reads as a flag or holds a separator passes.
+var reviewerRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}(/[A-Za-z0-9][A-Za-z0-9._-]*)?$`)
 
 // Job finds a job by name.
 func (f *Fleet) Job(name string) (Job, bool) {

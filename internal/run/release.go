@@ -289,6 +289,7 @@ func (x *Executor) release(ctx context.Context, job config.Job, repo config.Repo
 	if err != nil {
 		return finish(store.Failed, err.Error())
 	}
+	noteReview(ws, logf)
 	rec.PRURL = url
 	logf("note", "release PR opened for v%s: %s", next, url)
 	return finish(store.Proposed, "")

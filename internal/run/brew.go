@@ -312,6 +312,7 @@ func (x *Executor) brewSetup(ctx context.Context, repo config.Repo, opts Options
 	if err != nil {
 		return finish(store.Failed, err.Error())
 	}
+	noteReview(ws, logf)
 	rec.PRURL = url
 	logf("note", "brew setup proposed: %s", url)
 	return finish(store.Proposed, "")

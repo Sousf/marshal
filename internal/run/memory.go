@@ -157,6 +157,7 @@ func (m *memory) propose(ctx context.Context, x *Executor, parent *store.Run, pr
 		logf("note", "skill PR: %v", err)
 		return ""
 	}
+	noteReview(m.ws, logf)
 	class := "memory"
 	if _, ok := x.Fleet.Policy.Classes[class]; !ok {
 		class = parent.Class
@@ -171,6 +172,14 @@ func (m *memory) propose(ctx context.Context, x *Executor, parent *store.Run, pr
 	}
 	logf("note", "proposed skills %s: %s", strings.Join(names, ", "), url)
 	return url
+}
+
+// noteReview records a review request GitHub refused. The pull request
+// was opened; only the request is missing.
+func noteReview(ws *workspace.Workspace, logf func(kind, format string, args ...any)) {
+	if ws.ReviewErr != nil {
+		logf("note", "%v", ws.ReviewErr)
+	}
 }
 
 // skillRevisions renders the corrections runs proposed to long skills, for

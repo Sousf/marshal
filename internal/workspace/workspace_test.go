@@ -216,3 +216,44 @@ func TestPrepareBadURL(t *testing.T) {
 		t.Fatal("want clone failure")
 	}
 }
+
+// fakeGH puts a gh on PATH that records its arguments and answers pr
+// create with a URL.
+func fakeGH(t *testing.T, failEdit bool) (log string) {
+	t.Helper()
+	dir := t.TempDir()
+	log = filepath.Join(dir, "calls")
+	edit := ""
+	if failEdit {
+		edit = `[ "$1 $2" = "pr edit" ] && { echo "no such user" >&2; exit 1; }` + "\n"
+	}
+	script := "#!/bin/sh\necho \"$@\" >> " + log + "\n" + edit + `[ "$1 $2" = "pr create" ] && echo https://github.com/o/r/pull/7` + "\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "gh"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return log
+}
+
+func TestOpenPRRequestsReview(t *testing.T) {
+	log := fakeGH(t, false)
+	w := &Workspace{Dir: t.TempDir(), Branch: "marshal/x/1", Repo: config.Repo{Branch: "main", Reviewers: []string{"Sousf", "o/team"}}}
+	url, err := w.OpenPR(context.Background(), "t", "b", nil)
+	if err != nil || url != "https://github.com/o/r/pull/7" || w.ReviewErr != nil {
+		t.Fatalf("url=%q err=%v review=%v", url, err, w.ReviewErr)
+	}
+	calls, _ := os.ReadFile(log)
+	if !strings.Contains(string(calls), "pr edit https://github.com/o/r/pull/7 --add-reviewer Sousf,o/team") {
+		t.Errorf("calls:\n%s", calls)
+	}
+}
+
+// A reviewer GitHub refuses does not lose the pull request.
+func TestOpenPRReviewFailureKeepsPR(t *testing.T) {
+	fakeGH(t, true)
+	w := &Workspace{Dir: t.TempDir(), Branch: "marshal/x/1", Repo: config.Repo{Branch: "main", Reviewers: []string{"ghost"}}}
+	url, err := w.OpenPR(context.Background(), "t", "b", nil)
+	if err != nil || url == "" || w.ReviewErr == nil || !strings.Contains(w.ReviewErr.Error(), "no such user") {
+		t.Errorf("url=%q err=%v review=%v", url, err, w.ReviewErr)
+	}
+}

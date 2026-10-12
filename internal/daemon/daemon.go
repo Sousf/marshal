@@ -46,6 +46,7 @@ type GitHub interface {
 	HumanComments(ctx context.Context, url, exclude string, since time.Time) ([]github.Comment, error)
 	CommitCI(ctx context.Context, slug, sha string) (github.CI, bool, error)
 	CreatePR(ctx context.Context, slug, head, base, title, body string, labels []string) (string, error)
+	RequestReview(ctx context.Context, url string, reviewers []string) error
 }
 
 // Daemon holds the loop's state.
@@ -867,6 +868,9 @@ func (d *Daemon) revert(ctx context.Context, ladder policy.Ladder, repo config.R
 	if err != nil {
 		d.fail("run %s: revert PR: %v", r.ID, err)
 		return
+	}
+	if err := d.GH.RequestReview(ctx, url, repo.Reviewers); err != nil {
+		d.fail("run %s: revert PR review request: %v", r.ID, err)
 	}
 	merged := d.GH.MergePR(ctx, url) == nil
 	if !merged {

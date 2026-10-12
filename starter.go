@@ -6,6 +6,8 @@ const starterFleet = `# MARSHAL fleet file. The agent never edits this; you do.
 version: 1
 
 defaults:
+  # GitHub logins (or org/team) asked to review every PR MARSHAL opens.
+  # reviewers: [your-login]
   model: claude-opus-5-5
   effort: high
   max_turns: 60

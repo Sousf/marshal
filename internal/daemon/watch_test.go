@@ -126,6 +126,7 @@ func TestWatchRevertsOnRed(t *testing.T) {
 	ctx := context.Background()
 	gh := &fakeGH{prs: map[string]github.PR{}, commitCI: github.CI{Status: "completed", Conclusion: "failure", URL: "https://ci/run/1"}}
 	d, _, dir := newDaemonDir(t, gh)
+	d.Fleet.Defaults.Reviewers = []string{"Sousf"}
 	c := withNotify(t, d)
 	d.Store.PutTrust(ctx, store.Trust{Repo: "x", Class: "hardening", Level: "auto"})
 	r := machineMerge(t, d, dir, "soak", time.Now())
@@ -142,6 +143,9 @@ func TestWatchRevertsOnRed(t *testing.T) {
 	}
 	if len(gh.merged) != 1 {
 		t.Errorf("revert should be merged at once: %v", gh.merged)
+	}
+	if len(gh.reviewRequests) != 1 || !strings.HasSuffix(gh.reviewRequests[0], " Sousf") {
+		t.Errorf("the revert PR should request the operator's review: %v", gh.reviewRequests)
 	}
 	// The revert branch on the origin undoes the merge commit.
 	cmd := exec.Command("git", "diff", "--stat", r.MergeSHA+"~1", gh.created[0].head)

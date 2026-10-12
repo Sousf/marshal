@@ -29,6 +29,9 @@ type Workspace struct {
 	// Env is added to every git and gh invocation; the per-run token goes
 	// here as GH_TOKEN so it never lives in the daemon's environment.
 	Env []string
+	// ReviewErr is set when OpenPR opened the pull request but GitHub
+	// refused the review request. The pull request stands either way.
+	ReviewErr error
 }
 
 // Prepare clones repo into a fresh directory under root and checks out a new
@@ -293,7 +296,26 @@ func (w *Workspace) OpenPR(ctx context.Context, title, body string, labels []str
 		}
 		return "", fmt.Errorf("gh pr create: %w: %s", err, msg)
 	}
-	return strings.TrimSpace(string(out)), nil
+	url := strings.TrimSpace(string(out))
+	// Requested after creating, not with --reviewer, so a login GitHub
+	// refuses costs the review request and not the pull request.
+	if len(w.Repo.Reviewers) > 0 {
+		edit := w.cmd(ctx, w.Dir, "gh", "pr", "edit", url, "--add-reviewer", strings.Join(w.Repo.Reviewers, ","))
+		var stderr bytes.Buffer
+		edit.Stderr = &stderr
+		if err := edit.Run(); err != nil {
+			w.ReviewErr = fmt.Errorf("requesting review from %s: %w: %s", strings.Join(w.Repo.Reviewers, ", "), err, firstLine(stderr.String()))
+		}
+	}
+	return url, nil
+}
+
+func firstLine(s string) string {
+	s, _, _ = strings.Cut(strings.TrimSpace(s), "\n")
+	if len(s) > 200 {
+		s = s[:200]
+	}
+	return s
 }
 
 func asExit(err error, target **exec.ExitError) bool {
