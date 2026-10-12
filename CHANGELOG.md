@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.7 (2026-10-12)
+
+- MARSHAL_HOST is all a client machine needs
+
 ## v0.1.6 (2026-10-12)
 
 - Request the operator's review on every pull request MARSHAL opens
