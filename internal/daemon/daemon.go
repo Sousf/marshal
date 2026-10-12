@@ -1626,6 +1626,12 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 			resp.Verdict = &v
 		}
 		return resp
+	case "fleet":
+		b, err := d.Fleet.Shareable()
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{Text: string(b)}
 	case "trust":
 		recorded, err := d.Store.ListTrust(ctx)
 		if err != nil {

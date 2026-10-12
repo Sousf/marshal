@@ -221,3 +221,39 @@ func TestReviewers(t *testing.T) {
 		}
 	}
 }
+
+// What the daemon hands a remote client: enough to render repos, jobs and
+// the ladder, nothing that authenticates anything.
+func TestShareable(t *testing.T) {
+	src := good + `
+github_app: {app_id: 1, installation_id: 2, private_key_file: /secret/app.pem}
+notify:
+  ntfy: {url: "https://ntfy.sh/secret-topic", token: tk_secret}
+  telegram: {bot_token: "123:secretbot", chat_id: "42"}
+  webhook: https://hooks.example/secret
+`
+	src = strings.Replace(src, "{name: a, url: u,", "{name: a, url: \"https://x-access-token:ghs_secret@github.com/o/a.git\",", 1)
+	f, err := Parse([]byte(src))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := f.Shareable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"secret", "ghs_", "tk_", ".pem"} {
+		if strings.Contains(string(b), secret) {
+			t.Errorf("shared fleet leaks %q:\n%s", secret, b)
+		}
+	}
+	got, err := ParseShared(append(b, []byte("\nfield_from_a_newer_daemon: 1\n")...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Repos) != 1 || len(got.Jobs) != 2 || got.Repos[0].URL != "https://github.com/o/a.git" || got.Policy.Classes["c1"].Start != "review" {
+		t.Errorf("shared fleet lost what clients render: %+v", got)
+	}
+	if f.Notify.Telegram.BotToken == "" {
+		t.Error("Shareable must not modify the daemon's own fleet")
+	}
+}

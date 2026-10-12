@@ -260,7 +260,11 @@ MARSHAL_HOST=hermes1 marshal chat       # chat too; its commands go through the 
 ```
 
 Export `MARSHAL_HOST` in your shell and every command does this. One tunnel
-per process, closed on exit. `marshal logs -f` is the one thing that needs
+per process, closed on exit. The other machine needs only `marshal` and an
+`ssh hermes1` that logs in without a prompt: run history, the ladder and the
+fleet come from the daemon, with the fleet's credentials left out. Commands
+that act on the machine you type them on, such as `check`, `run`, `verify`
+and `deploy`, still read the local fleet file. `marshal logs -f` is the one thing that needs
 a real ssh session.
 
 To put the daemon on a host:

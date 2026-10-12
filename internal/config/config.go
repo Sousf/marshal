@@ -10,6 +10,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -472,6 +473,35 @@ func Load(path string) (*Fleet, error) {
 	}
 	f.dir = filepath.Dir(path)
 	return f, nil
+}
+
+// Shareable renders the fleet for a client on another machine: the repos,
+// jobs and policy it shows, without the notification credentials, the app
+// key's location, or credentials in a repo URL.
+func (f *Fleet) Shareable() ([]byte, error) {
+	c := *f
+	c.Notify = Notify{}
+	c.GitHubApp.PrivateKeyFile = ""
+	c.Repos = make([]Repo, len(f.Repos))
+	for i, r := range f.Repos {
+		if u, err := url.Parse(r.URL); err == nil && u.User != nil {
+			u.User = nil
+			r.URL = u.String()
+		}
+		c.Repos[i] = r
+	}
+	return yaml.Marshal(&c)
+}
+
+// ParseShared reads what Shareable wrote. The daemon validated it; a
+// client that is older or newer than the daemon still reads what it
+// knows, rather than refusing the whole fleet over one new field.
+func ParseShared(b []byte) (*Fleet, error) {
+	var f Fleet
+	if err := yaml.Unmarshal(b, &f); err != nil {
+		return nil, err
+	}
+	return &f, nil
 }
 
 // Parse decodes and validates fleet YAML.

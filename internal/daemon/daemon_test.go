@@ -818,6 +818,11 @@ func TestTriggerAndHandle(t *testing.T) {
 	if r := d.Handle(ctx, api.Request{Op: "autonomy", Value: "maybe"}); r.Error == "" {
 		t.Error("bad value should fail")
 	}
+	if r := d.Handle(ctx, api.Request{Op: "fleet"}); r.Error != "" || !strings.Contains(r.Text, "repos:") {
+		t.Errorf("fleet op: %+v", r)
+	} else if f, err := config.ParseShared([]byte(r.Text)); err != nil || len(f.Repos) != len(d.Fleet.Repos) {
+		t.Errorf("fleet op does not parse back: %v", err)
+	}
 	if r := d.Handle(ctx, api.Request{Op: "trust"}); len(r.Trust) != 2 {
 		t.Errorf("trust rows = %+v", r.Trust)
 	}

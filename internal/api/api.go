@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"time"
@@ -23,7 +24,8 @@ import (
 // Request is one call to the daemon.
 type Request struct {
 	// Op is one of: status, runs, run, events, trigger, task, fix, autonomy,
-	// trust, verdict, log, incidents, ack, quota. For ack, ID is a signature
+	// trust, verdict, log, incidents, ack, quota, fleet. fleet answers in
+	// Text with the daemon's fleet, credentials removed. For ack, ID is a signature
 	// prefix; for quota, Value "clear" lifts the hold; for incidents, Value
 	// "all" includes resolved ones.
 	// For task, Value is the instruction, Repo optional, Job an optional name.
@@ -149,6 +151,10 @@ type Client struct {
 // ErrDown is returned when no daemon is listening.
 var ErrDown = errors.New("daemon is not running")
 
+// MaxResponse bounds one answer from the daemon. A run's full event log is
+// the largest thing it sends.
+const MaxResponse = 64 << 20
+
 // Up reports whether a daemon answers on the socket.
 func (c Client) Up() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
@@ -172,7 +178,8 @@ func (c Client) Do(ctx context.Context, req Request) (Response, error) {
 		return Response{}, err
 	}
 	var resp Response
-	if err := json.NewDecoder(bufio.NewReader(conn)).Decode(&resp); err != nil {
+	// Bounded: over ssh the other end is another machine.
+	if err := json.NewDecoder(bufio.NewReader(io.LimitReader(conn, MaxResponse))).Decode(&resp); err != nil {
 		return Response{}, fmt.Errorf("daemon: %w", err)
 	}
 	if resp.Error != "" {

@@ -137,51 +137,9 @@ func app(args []string) error {
 		return cmdPreflight(ctx, rest)
 	}
 
-	fleet, err := config.Load(config.Path())
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no fleet file at %s; run `marshal init`", config.Path())
-		}
-		return err
-	}
-
+	// These talk to the daemon or read its history and need no fleet file,
+	// so a machine with only MARSHAL_HOST set can run them.
 	switch cmd {
-	case "check":
-		fmt.Printf("%s: ok (%d repos, %d jobs, %d classes)\n", config.Path(), len(fleet.Repos), len(fleet.Jobs), len(fleet.Policy.Classes))
-		app, err := auth(fleet)
-		switch {
-		case err != nil:
-			return err
-		case app == nil:
-			fmt.Println("identity: the host's gh login (no github_app configured)")
-		default:
-			fmt.Printf("identity: GitHub App %s, installation %d\n", app.Identity().Name, app.InstallationID)
-			if _, err := app.Token(ctx, ghapp.ReadOnly); err != nil {
-				return fmt.Errorf("github_app: could not mint a token: %w", err)
-			}
-			fmt.Println("identity: token minted ok")
-		}
-		return nil
-	case "repos":
-		return cmdRepos(fleet)
-	case "jobs":
-		return cmdJobs(fleet)
-	case "prompt":
-		return cmdPrompt(fleet, rest)
-	case "run":
-		return cmdRun(ctx, fleet, rest)
-	case "runs":
-		return cmdRuns(ctx, rest)
-	case "show":
-		return cmdShow(ctx, rest)
-	case "trust":
-		return cmdTrust(ctx, fleet)
-	case "serve":
-		return cmdServe(ctx, fleet, rest)
-	case "tui":
-		return cmdTUI(ctx, fleet)
-	case "chat":
-		return cmdChat(ctx, fleet, rest)
 	case "status":
 		return cmdStatus(ctx)
 	case "trigger":
@@ -230,6 +188,63 @@ func app(args []string) error {
 		return cmdAck(ctx, rest)
 	case "quota":
 		return cmdQuota(ctx, rest)
+	case "runs":
+		return cmdRuns(ctx, rest)
+	case "show":
+		return cmdShow(ctx, rest)
+	case "stop":
+		return cmdStop()
+	case "logs":
+		return cmdLogs(rest)
+	}
+
+	var fleet *config.Fleet
+	var err error
+	if remote.Host() != "" && daemonFleet[cmd] {
+		fleet, err = remoteFleet(ctx)
+	} else {
+		fleet, err = config.Load(config.Path())
+		if errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("no fleet file at %s; run `marshal init`", config.Path())
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	switch cmd {
+	case "check":
+		fmt.Printf("%s: ok (%d repos, %d jobs, %d classes)\n", config.Path(), len(fleet.Repos), len(fleet.Jobs), len(fleet.Policy.Classes))
+		app, err := auth(fleet)
+		switch {
+		case err != nil:
+			return err
+		case app == nil:
+			fmt.Println("identity: the host's gh login (no github_app configured)")
+		default:
+			fmt.Printf("identity: GitHub App %s, installation %d\n", app.Identity().Name, app.InstallationID)
+			if _, err := app.Token(ctx, ghapp.ReadOnly); err != nil {
+				return fmt.Errorf("github_app: could not mint a token: %w", err)
+			}
+			fmt.Println("identity: token minted ok")
+		}
+		return nil
+	case "repos":
+		return cmdRepos(fleet)
+	case "jobs":
+		return cmdJobs(fleet)
+	case "prompt":
+		return cmdPrompt(fleet, rest)
+	case "run":
+		return cmdRun(ctx, fleet, rest)
+	case "trust":
+		return cmdTrust(ctx, fleet)
+	case "serve":
+		return cmdServe(ctx, fleet, rest)
+	case "tui":
+		return cmdTUI(ctx, fleet)
+	case "chat":
+		return cmdChat(ctx, fleet, rest)
 	case "tap-key":
 		return cmdTapKey(ctx, fleet, rest)
 	case "verify":
@@ -270,10 +285,6 @@ func app(args []string) error {
 		return nil
 	case "deploy":
 		return cmdDeploy(ctx, fleet, rest)
-	case "stop":
-		return cmdStop()
-	case "logs":
-		return cmdLogs(rest)
 	}
 	return fmt.Errorf("unknown command %q\n%s", cmd, usage)
 }
@@ -857,7 +868,7 @@ func chatCommand(ctx context.Context, f *config.Fleet, st *store.Store, fresh bo
 	if resp, err := client().Do(ctx, api.Request{Op: "status"}); err == nil {
 		status = resp.Status
 	}
-	recent, _ := st.ListRuns(ctx, "", 8)
+	recent, _ := listRuns(ctx, "", 8)
 	return chat.Command(ctx, f, st, status, recent, chat.Options{New: fresh})
 }
 
@@ -986,6 +997,20 @@ func cmdAutonomy(ctx context.Context, args []string) error {
 	}
 	fmt.Println("autonomy", state)
 	return nil
+}
+
+// daemonFleet are the commands that, with MARSHAL_HOST set, show the
+// daemon's fleet rather than this machine's. The rest act here, with the
+// local fleet file: check, run, deploy, verify and the like.
+var daemonFleet = map[string]bool{"tui": true, "chat": true, "repos": true, "jobs": true, "trust": true}
+
+// remoteFleet asks the daemon for its fleet, credentials removed.
+func remoteFleet(ctx context.Context) (*config.Fleet, error) {
+	resp, err := client().Do(ctx, api.Request{Op: "fleet"})
+	if err != nil {
+		return nil, fmt.Errorf("fleet from %s: %w", remote.Host(), err)
+	}
+	return config.ParseShared([]byte(resp.Text))
 }
 
 func openStore() (*store.Store, error) {
@@ -1120,16 +1145,11 @@ func cmdRun(ctx context.Context, f *config.Fleet, args []string) error {
 }
 
 func cmdRuns(ctx context.Context, args []string) error {
-	st, err := openStore()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
 	repo := ""
 	if len(args) > 0 {
 		repo = args[0]
 	}
-	runs, err := st.ListRuns(ctx, repo, 30)
+	runs, err := listRuns(ctx, repo, 30)
 	if err != nil {
 		return err
 	}
@@ -1141,16 +1161,57 @@ func cmdRuns(ctx context.Context, args []string) error {
 	return w.Flush()
 }
 
+// listRuns reads run history from the daemon over the tunnel when
+// MARSHAL_HOST is set, else from this machine's database.
+func listRuns(ctx context.Context, repo string, limit int) ([]store.Run, error) {
+	if remote.Host() != "" {
+		resp, err := client().Do(ctx, api.Request{Op: "runs", Repo: repo, Limit: limit})
+		return resp.Runs, err
+	}
+	st, err := openStore()
+	if err != nil {
+		return nil, err
+	}
+	defer st.Close()
+	return st.ListRuns(ctx, repo, limit)
+}
+
+// runRecord is one run with its latest verdict and its event log, from
+// wherever listRuns would read.
+func runRecord(ctx context.Context, id string) (store.Run, *store.Verdict, []store.Event, error) {
+	if remote.Host() != "" {
+		v, err := client().Do(ctx, api.Request{Op: "verdict", ID: id})
+		if err != nil {
+			return store.Run{}, nil, nil, err
+		}
+		ev, err := client().Do(ctx, api.Request{Op: "events", ID: id})
+		if err != nil || ev.Run == nil {
+			return store.Run{}, nil, nil, err
+		}
+		return *ev.Run, v.Verdict, ev.Events, nil
+	}
+	st, err := openStore()
+	if err != nil {
+		return store.Run{}, nil, nil, err
+	}
+	defer st.Close()
+	r, err := st.GetRun(ctx, id)
+	if err != nil {
+		return store.Run{}, nil, nil, err
+	}
+	var verdict *store.Verdict
+	if v, ok, _ := st.LatestVerdict(ctx, r.ID); ok {
+		verdict = &v
+	}
+	ev, err := st.Events(ctx, r.ID)
+	return r, verdict, ev, err
+}
+
 func cmdShow(ctx context.Context, args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: marshal show <run-id>")
 	}
-	st, err := openStore()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	r, err := st.GetRun(ctx, args[0])
+	r, verdict, ev, err := runRecord(ctx, args[0])
 	if err != nil {
 		return err
 	}
@@ -1172,7 +1233,7 @@ func cmdShow(ctx context.Context, args []string) error {
 	if r.Feedback != "" {
 		fmt.Printf("  reviewer: %s\n", indent(r.Feedback, "            "))
 	}
-	if v, ok, _ := st.LatestVerdict(ctx, r.ID); ok {
+	if v := verdict; v != nil {
 		head := v.Head
 		if len(head) > 8 {
 			head = head[:8]
@@ -1182,10 +1243,6 @@ func cmdShow(ctx context.Context, args []string) error {
 			fmt.Printf("            %s\n", indent(v.Summary, "            "))
 		}
 	}
-	ev, err := st.Events(ctx, r.ID)
-	if err != nil {
-		return err
-	}
 	fmt.Println()
 	for _, e := range ev {
 		fmt.Printf("%s %-7s %s\n", e.At.Format("15:04:05"), e.Kind, indent(e.Text, "                 "))
@@ -1193,25 +1250,35 @@ func cmdShow(ctx context.Context, args []string) error {
 	if r.Summary != "" {
 		fmt.Printf("\n--- report ---\n%s\n", r.Summary)
 	}
-	if r.Status == store.Reported {
+	if r.Status == store.Reported && remote.Host() == "" {
 		fmt.Printf("\nsaved: %s\n", filepath.Join(config.StateDir(), "reports", r.ID+".md"))
 	}
 	return nil
 }
 
 func cmdTrust(ctx context.Context, f *config.Fleet) error {
-	st, err := openStore()
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	recorded, err := st.ListTrust(ctx)
-	if err != nil {
-		return err
+	var ladder []store.Trust
+	if remote.Host() != "" {
+		resp, err := client().Do(ctx, api.Request{Op: "trust"})
+		if err != nil {
+			return err
+		}
+		ladder = resp.Trust
+	} else {
+		st, err := openStore()
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		recorded, err := st.ListTrust(ctx)
+		if err != nil {
+			return err
+		}
+		ladder = daemon.Ladder(f, recorded)
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
 	fmt.Fprintln(w, "REPO\tCLASS\tLEVEL\tSTREAK\tAPPROVED\tREJECTED\tREVERTED")
-	for _, t := range daemon.Ladder(f, recorded) {
+	for _, t := range ladder {
 		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%d\t%d\t%d\n", t.Repo, t.Class, t.Level, t.Streak, t.Approvals, t.Rejections, t.Reverts)
 	}
 	return w.Flush()
