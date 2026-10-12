@@ -24,10 +24,13 @@ Checklist:
 6. **Personal information (PII).** Look through tracked files, test
    fixtures, sample data, logs and docs for real people's details: email
    addresses, phone numbers, postal addresses, national ID or social
-   security numbers, payment card numbers, dates of birth, IP addresses
-   tied to a person. Replace PII in fixtures and examples with reserved
+   security numbers, payment card numbers, dates of birth. Treat anything
+   else an attacker could use the same way: IP addresses, internal
+   hostnames and URLs, usernames and account IDs, and details of private
+   infrastructure. Replace these in fixtures and examples with reserved
    placeholders (`user@example.com`, `*.invalid`, 555-01xx phone numbers,
-   documented test card numbers) and keep the tests passing. Leave contact
+   documented test card numbers, `192.0.2.0/24` and `2001:db8::/32`
+   addresses) and keep the tests passing. Leave contact
    details a maintainer published on purpose (LICENSE, CODEOWNERS,
    SECURITY.md, package author fields) alone. Report PII in git history or
    in files you cannot safely edit; do not rewrite history.
