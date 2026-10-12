@@ -32,3 +32,31 @@ func TestOpenWithoutHost(t *testing.T) {
 		t.Error("no host must fail")
 	}
 }
+
+func TestParseHome(t *testing.T) {
+	for _, c := range []struct {
+		out, want string
+		ok        bool
+	}{
+		{"MARSHAL_HOME=/home/pete\n", "/home/pete", true},
+		{"welcome to hermes1\r\nMARSHAL_HOME=/home/pete\r\n", "/home/pete", true},
+		{"MARSHAL_HOME=/\n", "/", true},
+		{"MARSHAL_HOME=\n", "", false},
+		{"MARSHAL_HOME=relative\n", "", false},
+		{"MARSHAL_HOME=/a:b\n", "", false},
+		{"MARSHAL_HOME=/a\x1bb\n", "", false},
+		{"/home/pete\n", "", false},
+	} {
+		got, err := parseHome(c.out)
+		if (err == nil) != c.ok || got != c.want {
+			t.Errorf("parseHome(%q) = %q, %v", c.out, got, err)
+		}
+	}
+}
+
+func TestOpenRejectsOptionHost(t *testing.T) {
+	t.Setenv(HostEnv, "-oProxyCommand=true")
+	if _, err := Open(context.Background()); err == nil {
+		t.Error("a host starting with a dash must be refused")
+	}
+}
