@@ -373,6 +373,12 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			if _, known := d.Fleet.Job(r.Job); (!known && r.Job != "skill") || r.Job == run.ReleaseJob {
 				continue
 			}
+			// A conflicting PR cannot merge and its checks say nothing
+			// about the merge, so the conflict comes first.
+			if pr.Conflicting() {
+				d.resolveConflicts(ctx, repo, r, pr)
+				continue
+			}
 			// Red checks on MARSHAL's own PR are MARSHAL's to fix, within a
 			// cap. Nothing else happens to the PR while it is red.
 			if pr.Checks == "FAILURE" {
@@ -539,7 +545,9 @@ func (d *Daemon) addressReview(ctx context.Context, repo config.Repo, r store.Ru
 			return true
 		}
 		attempts++
-		if f.StartedAt.After(since) {
+		// Only a review follow-up read the comments; one that fixed checks
+		// or conflicts did not, and must not hide them.
+		if f.Job == "address-review" && f.StartedAt.After(since) {
 			since = f.StartedAt
 		}
 	}
@@ -603,6 +611,81 @@ func (d *Daemon) addressReview(ctx context.Context, repo config.Repo, r store.Ru
 		}
 	}()
 	return true
+}
+
+// resolveConflicts starts a follow-up that merges the base branch into a
+// conflicting proposal. Each head is attempted once, and the per-PR cap is
+// shared with check fixes and review follow-ups.
+func (d *Daemon) resolveConflicts(ctx context.Context, repo config.Repo, r store.Run, pr github.PR) {
+	cap := d.Fleet.Policy.Caps.FixAttempts()
+	if cap == 0 {
+		return
+	}
+	prior, err := d.Store.Followups(ctx, r.ID)
+	if err != nil {
+		d.fail("run %s: followups: %v", r.ID, err)
+		return
+	}
+	attempts := 0
+	for _, f := range prior {
+		if f.Status == store.Running {
+			return
+		}
+		if f.Job == run.ResolveConflicts && f.BaseHead == pr.HeadSHA && pr.HeadSHA != "" {
+			return // tried on this head; a new push or a human comes next
+		}
+		if f.Status == store.Pushed || f.Status == store.NoChange || f.Status == store.Failed {
+			attempts++
+		}
+	}
+	if attempts >= cap {
+		if !pr.HasLabel("marshal:needs-human") {
+			d.note(ctx, r.ID, "conflicts with the base after %d follow-up(s); handing to a human", attempts)
+			_ = d.GH.CommentPR(ctx, r.PRURL, fmt.Sprintf("This pull request conflicts with its base, and MARSHAL has made %d follow-up(s) on it and stopped at the cap. It needs a human.", attempts))
+			_ = d.GH.AddLabel(ctx, r.PRURL, "marshal:needs-human")
+			d.send(ctx, notify.Event{Kind: notify.NeedsHuman, Title: r.Repo + ": merge conflicts after " + fmt.Sprint(attempts) + " follow-up(s)", Body: r.Job + " · " + pr.Title, URL: r.PRURL})
+		}
+		return
+	}
+	if d.heldErr(ctx) != nil {
+		return
+	}
+	d.mu.Lock()
+	if _, ok := d.running[repo.Name]; ok {
+		d.mu.Unlock()
+		return
+	}
+	id := store.NewID()
+	d.running[repo.Name] = id
+	d.mu.Unlock()
+	d.note(ctx, r.ID, "conflicts with the base at head %s; starting follow-up %s", short(pr.HeadSHA), id)
+	x := &run.Executor{Fleet: d.Fleet, Store: d.Store, Adapter: d.Adapter, WorkRoot: d.WorkRoot, Auth: d.Auth}
+	go func() {
+		defer func() {
+			d.mu.Lock()
+			delete(d.running, repo.Name)
+			d.mu.Unlock()
+		}()
+		rec, err := x.FollowupKind(d.base, run.ResolveConflicts, r, pr, "", run.Options{ID: id})
+		if err != nil {
+			d.fail("run %s: %v", id, err)
+			return
+		}
+		d.Log.Printf("run %s: %s (conflict follow-up for %s)", id, rec.Status, r.ID)
+		switch rec.Status {
+		case store.Pushed:
+			_ = d.GH.CommentPR(d.base, r.PRURL, "MARSHAL merged the base branch into this pull request and resolved the conflicts (run `"+id+"`).\n\n"+rec.Summary)
+		case store.NoChange, store.Failed, store.Blocked:
+			msg := rec.Summary
+			if rec.Error != "" {
+				msg = rec.Error
+			}
+			_ = d.GH.CommentPR(d.base, r.PRURL, fmt.Sprintf("MARSHAL could not resolve the conflicts with the base branch (run `%s`, %s).\n\n%s", id, rec.Status, msg))
+			if rec.Status != store.NoChange {
+				d.incident(repo.Name, run.ResolveConflicts, rec, repo.Name+": conflict follow-up "+string(rec.Status), r.PRURL)
+			}
+		}
+	}()
 }
 
 // fixChecks starts a follow-up run that pushes a fix to a red proposal.

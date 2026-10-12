@@ -30,7 +30,7 @@ const Contract = `
 - Run the project's tests before you finish. A change that does not pass them is not finished.
 - Stay inside the task. Fix nothing you were not asked to fix; note it in your report instead.
 - Your final message is used verbatim as the pull request. Format it as:
-  - First line: a commit-style title under 70 characters.
+  - First line: the title. Name the change in the imperative, in at most 50 characters ("Pin actions to commit SHAs"). No "I", no summary of how you did it; that goes in the body.
   - Blank line, then the body: what changed, why, how you verified it, and anything the reviewer should look at.
   - If you changed nothing, say so in one line starting with "NO CHANGE:" and explain why.
 - End your report with a section headed exactly "## Lessons" when, and only when, you learned

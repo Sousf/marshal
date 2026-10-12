@@ -181,7 +181,7 @@ func (f *fakeAdapter) Run(_ context.Context, req runner.Request, emit func(runne
 	if f.fail != nil {
 		return runner.Result{IsError: true}, f.fail
 	}
-	if f.fix != nil && (strings.Contains(req.Prompt, "Fix failing checks") || strings.Contains(req.Prompt, "Address feedback")) {
+	if f.fix != nil && (strings.Contains(req.Prompt, "Fix failing checks") || strings.Contains(req.Prompt, "Address feedback") || strings.Contains(req.Prompt, "Resolve merge conflicts")) {
 		f.fix(req.Dir)
 		return runner.Result{Output: "Fix the test\n\nCorrected the assertion.", Turns: 2, CostUSD: 0.02}, nil
 	}
@@ -560,6 +560,95 @@ func TestRedChecksGetFixedWithinCap(t *testing.T) {
 	}
 	if v, ok, _ := d.Store.LatestVerdict(ctx, r.ID); ok {
 		t.Errorf("no verification while red: %+v", v)
+	}
+}
+
+// conflictingProposal records a proposal whose branch and the origin's main
+// both changed the same file since they split. Main also changes VERSION,
+// which agents may never touch, so the merge brings in a locked file the
+// run did not write. It returns the proposal and the conflicted file.
+func conflictingProposal(t *testing.T, d *Daemon, gh *fakeGH, dir string) (store.Run, string) {
+	t.Helper()
+	r := proposalIn(t, d, gh, dir, "hardening", "u", time.Now())
+	file := strings.ReplaceAll(r.Branch, "/", "-") + ".txt"
+	os.WriteFile(filepath.Join(dir, file), []byte("y\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "VERSION"), []byte("0.2.0\n"), 0o644)
+	for _, args := range [][]string{{"add", "."}, {"commit", "-q", "-m", "base moves"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	return r, file
+}
+
+func TestConflictsAreResolvedWithAMerge(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "SUCCESS", Mergeable: "CONFLICTING", Title: "T", Body: "B"}}}
+	d, a, dir := newDaemonDir(t, gh)
+	r, file := conflictingProposal(t, d, gh, dir)
+	a.fix = func(wd string) { os.WriteFile(filepath.Join(wd, file), []byte("x\ny\n"), 0o644) }
+
+	settle(t, d)
+	wait(t, d)
+	fu, _ := d.Store.Followups(ctx, r.ID)
+	if len(fu) != 1 || fu[0].Job != "resolve-conflicts" || fu[0].Status != store.Pushed {
+		t.Fatalf("followups = %+v", fu)
+	}
+	if !strings.Contains(strings.Join(a.prompts, "\n"), "- `"+file+"`") {
+		t.Error("the brief should list the conflicted file")
+	}
+	git := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("git %v: %v", args, err)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	if parents := strings.Fields(git("rev-list", "--parents", "-1", r.Branch)); len(parents) != 3 {
+		t.Errorf("the branch head should be a merge commit: %v", parents)
+	}
+	if got := git("show", r.Branch+":"+file); got != "x\ny" {
+		t.Errorf("resolved file = %q", got)
+	}
+	if n := len(gh.comments); n != 1 || !strings.Contains(gh.comments[0], "resolved the conflicts") {
+		t.Errorf("comments = %v", gh.comments)
+	}
+	// GitHub has not caught up and still reports the same head: no retry.
+	settle(t, d)
+	wait(t, d)
+	if fu, _ := d.Store.Followups(ctx, r.ID); len(fu) != 1 {
+		t.Error("the same conflicting head must not be attempted twice")
+	}
+	if len(gh.merged) != 0 {
+		t.Error("a conflicting PR never merges")
+	}
+}
+
+func TestConflictMarkersLeftFailTheRun(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{"u": {State: "OPEN", Checks: "SUCCESS", Mergeable: "CONFLICTING", Title: "T", Body: "B"}}}
+	d, _, dir := newDaemonDir(t, gh)
+	r, file := conflictingProposal(t, d, gh, dir)
+	head := gh.prs["u"].HeadSHA
+
+	settle(t, d)
+	wait(t, d)
+	fu, _ := d.Store.Followups(ctx, r.ID)
+	if len(fu) != 1 || fu[0].Status != store.Failed || !strings.Contains(fu[0].Error, file) {
+		t.Fatalf("followups = %+v", fu)
+	}
+	cmd := exec.Command("git", "rev-parse", r.Branch)
+	cmd.Dir = dir
+	if out, _ := cmd.Output(); strings.TrimSpace(string(out)) != head {
+		t.Error("nothing may be pushed while markers remain")
+	}
+	if n := len(gh.comments); n != 1 || !strings.Contains(gh.comments[0], "could not resolve") {
+		t.Errorf("comments = %v", gh.comments)
 	}
 }
 
