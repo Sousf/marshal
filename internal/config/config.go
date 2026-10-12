@@ -160,6 +160,12 @@ func (h Homebrew) BrewPath() string {
 	return "/home/linuxbrew/.linuxbrew/bin/brew"
 }
 
+// Formula is the full brew name of a tool in the tap: owner/tap/name.
+func (h Homebrew) Formula(name string) string {
+	owner, tap, _, _ := h.TapParts()
+	return strings.ToLower(owner + "/" + strings.TrimPrefix(tap, "homebrew-") + "/" + name)
+}
+
 // TapParts splits the tap into owner, repository and branch.
 func (h Homebrew) TapParts() (owner, name, branch string, ok bool) {
 	owner, name, ok = strings.Cut(h.Tap, "/")

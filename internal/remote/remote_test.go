@@ -60,3 +60,40 @@ func TestOpenRejectsOptionHost(t *testing.T) {
 		t.Error("a host starting with a dash must be refused")
 	}
 }
+
+func TestDeployBrewSteps(t *testing.T) {
+	d := Deploy{Host: "hermes1", Source: "/src", Unit: "/src/packaging/marshal.service", Brew: true,
+		BrewPath: "/home/linuxbrew/.linuxbrew/bin/brew", Formula: "sousf/tap/marshal"}
+	steps := strings.Join(d.Steps(), "\n")
+	for _, want := range []string{"brew install --formula sousf/tap/marshal", "marshal-upgrade.timer", "/home/linuxbrew/.linuxbrew/opt/marshal/bin/marshal"} {
+		if !strings.Contains(steps, want) {
+			t.Errorf("brew steps missing %q:\n%s", want, steps)
+		}
+	}
+	if strings.Contains(steps, "go build") {
+		t.Error("a brew deploy installs the released binary; it builds nothing")
+	}
+	plain := strings.Join(Deploy{Host: "h", Source: "/s"}.Steps(), "\n")
+	if !strings.Contains(plain, "disable --now marshal-upgrade.timer") {
+		t.Error("a binary deploy must stop brew upgrades replacing what it installed")
+	}
+}
+
+func TestBrewUnits(t *testing.T) {
+	unit := []byte("[Service]\nExecStart=%h/.local/bin/marshal serve\nRestart=on-failure\n")
+	svc, up, timer, err := brewUnits(unit, "/home/linuxbrew/.linuxbrew/bin/brew", "sousf/tap/marshal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(svc, "ExecStart=/home/linuxbrew/.linuxbrew/opt/marshal/bin/marshal serve\n") || strings.Contains(svc, ".local/bin/marshal") {
+		t.Errorf("service:\n%s", svc)
+	}
+	if !strings.Contains(up, "ExecStart=/home/linuxbrew/.linuxbrew/bin/brew upgrade --formula sousf/tap/marshal") || !strings.Contains(timer, "OnUnitActiveSec=") {
+		t.Errorf("upgrade:\n%s\ntimer:\n%s", up, timer)
+	}
+	for _, bad := range [][2]string{{"brew", "sousf/tap/marshal"}, {"/b/brew", "x; rm -rf ~"}, {"/b/brew $(id)", "a/b/c"}} {
+		if _, _, _, err := brewUnits(unit, bad[0], bad[1]); err == nil {
+			t.Errorf("should refuse brew=%q formula=%q", bad[0], bad[1])
+		}
+	}
+}

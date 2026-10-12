@@ -87,7 +87,7 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
   marshal app status              which repositories the app installation can reach
   marshal version
 
-  marshal deploy <host> [--with-state] [--dry-run]
+  marshal deploy <host> [--brew] [--with-state] [--dry-run]
                                   install MARSHAL as a systemd user service on another machine
 
 Files:
@@ -492,7 +492,7 @@ func cmdApp(ctx context.Context, f *config.Fleet, args []string) error {
 }
 
 func cmdDeploy(ctx context.Context, f *config.Fleet, args []string) error {
-	host, withState, dry := "", false, false
+	host, withState, dry, brew := "", false, false, false
 	var env []string
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -500,6 +500,8 @@ func cmdDeploy(ctx context.Context, f *config.Fleet, args []string) error {
 			withState = true
 		case "--dry-run":
 			dry = true
+		case "--brew":
+			brew = true
 		case "--env":
 			if i+1 >= len(args) {
 				return errors.New("--env needs KEY=value")
@@ -508,13 +510,13 @@ func cmdDeploy(ctx context.Context, f *config.Fleet, args []string) error {
 			i++
 		default:
 			if strings.HasPrefix(args[i], "-") || host != "" {
-				return fmt.Errorf("usage: marshal deploy <host> [--with-state] [--env KEY=value]... [--dry-run]")
+				return fmt.Errorf("usage: marshal deploy <host> [--brew] [--with-state] [--env KEY=value]... [--dry-run]")
 			}
 			host = args[i]
 		}
 	}
 	if host == "" {
-		return errors.New("usage: marshal deploy <host> [--with-state] [--env KEY=value]... [--dry-run]")
+		return errors.New("usage: marshal deploy <host> [--brew] [--with-state] [--env KEY=value]... [--dry-run]")
 	}
 	src, err := sourceDir()
 	if err != nil {
@@ -528,6 +530,12 @@ func cmdDeploy(ctx context.Context, f *config.Fleet, args []string) error {
 		Env:    env,
 		DryRun: dry,
 		Out:    os.Stdout,
+	}
+	if brew {
+		if _, _, _, ok := f.Homebrew.TapParts(); !ok {
+			return errors.New("--brew needs homebrew.tap in the fleet file")
+		}
+		d.Brew, d.BrewPath, d.Formula = true, f.Homebrew.BrewPath(), f.Homebrew.Formula("marshal")
 	}
 	if f.GitHubApp.PrivateKeyFile != "" {
 		key := f.GitHubApp.PrivateKeyFile
@@ -638,7 +646,7 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 	} else {
 		logger.Printf("no notify channels configured; events go to this log only")
 	}
-	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{Never: f.Never.Tools}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule, Notify: n, LogPath: logFile}
+	d := &daemon.Daemon{Fleet: f, Store: st, Adapter: runner.Claude{Never: f.Never.Tools}, GH: ghClient(app), Version: version, Tick: tick, Log: logger, Auth: app, NoSchedule: noSchedule, Notify: n, LogPath: logFile, Self: selfPath()}
 	if !d.Adapter.Available() {
 		logger.Printf("warning: %s is not on PATH; scheduled runs will fail until it is", "claude")
 	}
@@ -678,6 +686,24 @@ func cmdServe(ctx context.Context, f *config.Fleet, args []string) error {
 		return serveErr
 	}
 	return runErr
+}
+
+// selfPath is the path this process was started from, as given: the
+// service's ExecStart, not the file a link resolves to, so a restart
+// follows the link to whatever is installed there next.
+func selfPath() string {
+	p := os.Args[0]
+	if !strings.Contains(p, string(os.PathSeparator)) {
+		var err error
+		if p, err = exec.LookPath(p); err != nil {
+			return ""
+		}
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return ""
+	}
+	return abs
 }
 
 // detachServe re-executes this binary as a daemon in its own session, with

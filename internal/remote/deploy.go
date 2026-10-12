@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -27,6 +28,11 @@ type Deploy struct {
 	// Env lines written to ~/.config/marshal/env for the service, such as
 	// ANTHROPIC_API_KEY=... Empty means none.
 	Env []string
+	// Brew installs MARSHAL with the host's brew from Formula instead of
+	// copying a binary built here, and adds a timer that keeps it upgraded.
+	Brew     bool
+	BrewPath string
+	Formula  string
 	// DryRun prints the plan instead of running it.
 	DryRun bool
 	Out    io.Writer
@@ -35,10 +41,22 @@ type Deploy struct {
 // Steps renders the plan as the shell commands it will run.
 func (d Deploy) Steps() []string {
 	bin := "~/.local/bin/marshal"
-	steps := []string{
-		fmt.Sprintf("local: GOOS=linux GOARCH=amd64 go build -o <tmp>/marshal %s", d.Source),
-		fmt.Sprintf("ssh %s mkdir -p ~/.local/bin ~/.config/marshal ~/.local/share/marshal ~/.config/systemd/user", d.Host),
-		fmt.Sprintf("scp <tmp>/marshal %s:%s", d.Host, bin),
+	var steps []string
+	if d.Brew {
+		steps = []string{
+			fmt.Sprintf("ssh %s mkdir -p ~/.local/bin ~/.config/marshal ~/.local/share/marshal ~/.config/systemd/user", d.Host),
+			fmt.Sprintf("ssh %s %s update && %s install --formula %s (or upgrade)", d.Host, d.BrewPath, filepath.Base(d.BrewPath), d.Formula),
+			fmt.Sprintf("ssh %s ln -s %s %s", d.Host, filepath.Join(brewPrefix(d.BrewPath), "bin", "marshal"), bin),
+			fmt.Sprintf("scp marshal.service %s:~/.config/systemd/user/  (ExecStart=%s serve)", d.Host, brewExec(d.BrewPath)),
+			fmt.Sprintf("scp marshal-upgrade.service marshal-upgrade.timer %s:~/.config/systemd/user/  (brew upgrade hourly, outside the daemon's sandbox)", d.Host),
+		}
+	} else {
+		steps = []string{
+			fmt.Sprintf("local: GOOS=linux GOARCH=amd64 go build -o <tmp>/marshal %s", d.Source),
+			fmt.Sprintf("ssh %s mkdir -p ~/.local/bin ~/.config/marshal ~/.local/share/marshal ~/.config/systemd/user", d.Host),
+			fmt.Sprintf("ssh %s systemctl --user disable --now marshal-upgrade.timer  (if a brew deploy left one)", d.Host),
+			fmt.Sprintf("scp <tmp>/marshal %s:%s", d.Host, bin),
+		}
 	}
 	if d.Fleet != "" {
 		steps = append(steps, fmt.Sprintf("scp %s %s:~/.config/marshal/fleet.yaml", d.Fleet, d.Host))
@@ -52,13 +70,13 @@ func (d Deploy) Steps() []string {
 	if len(d.Env) > 0 {
 		steps = append(steps, fmt.Sprintf("write ~/.config/marshal/env on %s (%d line(s), mode 600)", d.Host, len(d.Env)))
 	}
-	if d.Unit != "" {
+	if d.Unit != "" && !d.Brew {
 		steps = append(steps, fmt.Sprintf("scp %s %s:~/.config/systemd/user/marshal.service", d.Unit, d.Host))
 	}
 	steps = append(steps,
 		fmt.Sprintf("ssh %s %s check", d.Host, bin),
 		fmt.Sprintf("ssh %s loginctl enable-linger  (so the service runs while logged out)", d.Host),
-		fmt.Sprintf("ssh %s systemctl --user daemon-reload && systemctl --user enable --now marshal", d.Host),
+		fmt.Sprintf("ssh %s systemctl --user daemon-reload && systemctl --user enable --now marshal%s", d.Host, map[bool]string{true: " marshal-upgrade.timer"}[d.Brew]),
 		fmt.Sprintf("ssh %s systemctl --user --no-pager status marshal", d.Host),
 	)
 	return steps
@@ -81,12 +99,25 @@ func (d Deploy) Run(ctx context.Context) error {
 	}
 	defer os.RemoveAll(tmp)
 	bin := filepath.Join(tmp, "marshal")
-	fmt.Fprintln(d.Out, "building linux/amd64 binary")
-	build := exec.CommandContext(ctx, "go", "build", "-ldflags", "-X main.version="+version(d.Source), "-o", bin, ".")
-	build.Dir = d.Source
-	build.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
-	if out, err := build.CombinedOutput(); err != nil {
-		return fmt.Errorf("build: %w\n%s", err, out)
+	var units map[string]string
+	if d.Brew {
+		raw, err := os.ReadFile(d.Unit)
+		if err != nil {
+			return err
+		}
+		svc, up, timer, err := brewUnits(raw, d.BrewPath, d.Formula)
+		if err != nil {
+			return err
+		}
+		units = map[string]string{"marshal.service": svc, "marshal-upgrade.service": up, "marshal-upgrade.timer": timer}
+	} else {
+		fmt.Fprintln(d.Out, "building linux/amd64 binary")
+		build := exec.CommandContext(ctx, "go", "build", "-ldflags", "-X main.version="+version(d.Source), "-o", bin, ".")
+		build.Dir = d.Source
+		build.Env = append(os.Environ(), "GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0")
+		if out, err := build.CombinedOutput(); err != nil {
+			return fmt.Errorf("build: %w\n%s", err, out)
+		}
 	}
 	ssh := func(args string) error {
 		fmt.Fprintln(d.Out, "ssh "+d.Host+" "+args)
@@ -112,8 +143,26 @@ func (d Deploy) Run(ctx context.Context) error {
 	// A running service holds the binary open; stop it first so the copy
 	// does not fail with "text file busy".
 	_ = ssh("systemctl --user stop marshal 2>/dev/null || true")
-	if err := scp(bin, "~/.local/bin/marshal", "755"); err != nil {
-		return err
+	if d.Brew {
+		f, brew := d.Formula, d.BrewPath
+		if err := ssh(fmt.Sprintf("NONINTERACTIVE=1 %s update --quiet && { %s list --formula %s >/dev/null 2>&1 && %s upgrade --formula %s || %s install --formula %s; }", brew, brew, f, brew, f, brew, f)); err != nil {
+			return fmt.Errorf("brew on %s: %w", d.Host, err)
+		}
+		// The link keeps marshal on the PATH of an ssh session; the service
+		// starts brew's opt path directly.
+		if err := ssh("rm -f ~/.local/bin/marshal && ln -s " + filepath.Join(brewPrefix(brew), "bin", "marshal") + " ~/.local/bin/marshal"); err != nil {
+			return err
+		}
+	} else {
+		// A brew deploy left a link into the Cellar here and a timer that
+		// upgrades it; copying through the link would write into the keg.
+		_ = ssh("systemctl --user disable --now marshal-upgrade.timer 2>/dev/null || true")
+		if err := ssh("rm -f ~/.local/bin/marshal"); err != nil {
+			return err
+		}
+		if err := scp(bin, "~/.local/bin/marshal", "755"); err != nil {
+			return err
+		}
 	}
 	if d.Fleet != "" {
 		if err := scp(d.Fleet, "~/.config/marshal/fleet.yaml", "600"); err != nil {
@@ -139,7 +188,17 @@ func (d Deploy) Run(ctx context.Context) error {
 			return err
 		}
 	}
-	if d.Unit != "" {
+	if d.Brew {
+		for _, name := range []string{"marshal.service", "marshal-upgrade.service", "marshal-upgrade.timer"} {
+			p := filepath.Join(tmp, name)
+			if err := os.WriteFile(p, []byte(units[name]), 0o644); err != nil {
+				return err
+			}
+			if err := scp(p, "~/.config/systemd/user/"+name, "644"); err != nil {
+				return err
+			}
+		}
+	} else if d.Unit != "" {
 		if err := scp(d.Unit, "~/.config/systemd/user/marshal.service", "644"); err != nil {
 			return err
 		}
@@ -157,10 +216,81 @@ func (d Deploy) Run(ctx context.Context) error {
 		fmt.Fprintf(d.Out, "warning: %s not found on %s; runs will fail until installed and logged in\n", strings.Join(missing, " and "), d.Host)
 	}
 	_ = ssh("loginctl enable-linger 2>/dev/null || echo 'enable-linger needs a privileged session; run: sudo loginctl enable-linger $USER'")
-	if err := ssh("systemctl --user daemon-reload && systemctl --user enable --now marshal"); err != nil {
+	enable := "marshal"
+	if d.Brew {
+		enable += " marshal-upgrade.timer"
+	}
+	if err := ssh("systemctl --user daemon-reload && systemctl --user enable --now " + enable); err != nil {
 		return err
 	}
 	return ssh("systemctl --user --no-pager --lines=5 status marshal")
+}
+
+var (
+	formulaRE = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._-]*/[a-z0-9][a-z0-9._+-]*$`)
+	pathRE    = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
+)
+
+// brewPrefix is the Homebrew prefix a brew executable belongs to.
+func brewPrefix(brew string) string { return filepath.Dir(filepath.Dir(brew)) }
+
+// brewExec is the stable path brew keeps pointing at the installed MARSHAL.
+func brewExec(brew string) string {
+	return filepath.Join(brewPrefix(brew), "opt", "marshal", "bin", "marshal")
+}
+
+// brewUnits renders the units for a brew-managed host: the service started
+// from brew's opt path, and a timer that upgrades the formula. The upgrade
+// runs in its own unit so the daemon's sandbox keeps the brew prefix
+// read-only: code the daemon runs for a pull request cannot replace the
+// binary it next restarts into. Both values end up in shell commands and
+// unit files, so they are held to plain paths and names.
+func brewUnits(unit []byte, brew, formula string) (svc, upgrade, timer string, err error) {
+	if !pathRE.MatchString(brew) || filepath.Base(brew) != "brew" {
+		return "", "", "", fmt.Errorf("brew path %q: want an absolute path to brew", brew)
+	}
+	if !formulaRE.MatchString(formula) {
+		return "", "", "", fmt.Errorf("formula %q: want owner/tap/name", formula)
+	}
+	var lines []string
+	found := false
+	for _, l := range strings.Split(string(unit), "\n") {
+		if strings.HasPrefix(l, "ExecStart=") {
+			l, found = "ExecStart="+brewExec(brew)+" serve", true
+		}
+		lines = append(lines, l)
+	}
+	if !found {
+		return "", "", "", fmt.Errorf("unit has no ExecStart line")
+	}
+	upgrade = `# Upgrades MARSHAL from its Homebrew tap. Installed by marshal deploy --brew.
+# It runs outside marshal.service, whose sandbox keeps the brew prefix
+# read-only; the daemon sees the new binary and restarts into it when idle.
+[Unit]
+Description=Upgrade MARSHAL from Homebrew
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=NONINTERACTIVE=1 HOMEBREW_NO_ENV_HINTS=1
+ExecStart=` + brew + ` update --quiet
+ExecStart=` + brew + ` upgrade --formula ` + formula + `
+`
+	timer = `# Hourly: releases are rare and brew update is a network call.
+[Unit]
+Description=Upgrade MARSHAL from Homebrew hourly
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+`
+	return strings.Join(lines, "\n"), upgrade, timer, nil
 }
 
 func version(src string) string {

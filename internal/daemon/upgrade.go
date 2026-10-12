@@ -2,12 +2,14 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/Sousf/marshal/internal/notify"
@@ -102,8 +104,7 @@ func formulaHas(formula, ver string) bool {
 
 // brewUpgrade upgrades one Sousf/tap formula if it is installed here.
 func (d *Daemon) brewUpgrade(ctx context.Context, name, ver string) {
-	owner, tap, _, _ := d.Fleet.Homebrew.TapParts()
-	full := strings.ToLower(owner + "/" + strings.TrimPrefix(tap, "homebrew-") + "/" + name)
+	full := d.Fleet.Homebrew.Formula(name)
 	brew := d.Fleet.Homebrew.BrewPath()
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Minute)
 	defer cancel()
@@ -150,6 +151,47 @@ func lastLines(s string, n int) string {
 		lines = lines[len(lines)-n:]
 	}
 	return strings.Join(lines, " | ")
+}
+
+// watchSelf notices a new binary at Self. The upgrade itself happens
+// outside this process: on a host where brew is managed by a separate
+// timer, the daemon's sandbox keeps the brew prefix read-only, so the
+// code it runs for others cannot replace the binary it restarts into.
+func (d *Daemon) watchSelf() {
+	if d.Self == "" {
+		return
+	}
+	fp, err := fingerprint(d.Self)
+	if err != nil {
+		return // mid-upgrade or gone; look again next tick
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	switch {
+	case d.selfSeen == "":
+		d.selfSeen = fp
+	case fp != d.selfSeen && d.restartTo == "":
+		d.restartTo = d.Self
+		d.Log.Printf("a new marshal is installed at %s; restarting into it once nothing is running", d.Self)
+	}
+}
+
+// fingerprint identifies the file a path resolves to, so a moved link and
+// a file replaced in place both count as a change.
+func fingerprint(path string) (string, error) {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	fi, err := os.Stat(target)
+	if err != nil {
+		return "", err
+	}
+	ino := uint64(0)
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		ino = uint64(st.Ino)
+	}
+	return fmt.Sprintf("%s|%d|%d|%d", target, ino, fi.Size(), fi.ModTime().UnixNano()), nil
 }
 
 // maybeRestart hands over to a newly installed MARSHAL when nothing is in

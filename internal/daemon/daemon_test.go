@@ -1263,3 +1263,43 @@ func TestFollowupThatCannotStartSaysSo(t *testing.T) {
 		t.Errorf("no explanation posted:\n%s", posted)
 	}
 }
+
+// Whatever replaces the binary the service starts from, a brew upgrade
+// moving the opt link or a deploy copying a new file, the daemon restarts
+// into it once idle, through the same path.
+func TestRestartsWhenItsBinaryChanges(t *testing.T) {
+	d, _ := newDaemon(t, &fakeGH{prs: map[string]github.PR{}})
+	root := t.TempDir()
+	for _, v := range []string{"1", "2"} {
+		os.MkdirAll(filepath.Join(root, "Cellar", v), 0o755)
+		os.WriteFile(filepath.Join(root, "Cellar", v, "marshal"), []byte("#!/bin/sh\n"), 0o755)
+	}
+	self := filepath.Join(root, "opt-marshal")
+	os.Symlink(filepath.Join(root, "Cellar", "1", "marshal"), self)
+	d.Self = self
+	var restarted string
+	d.Restart = func(p string) { restarted = p }
+
+	d.watchSelf()
+	d.maybeRestart()
+	if restarted != "" {
+		t.Fatal("restarted although nothing changed")
+	}
+	os.Remove(self)
+	os.Symlink(filepath.Join(root, "Cellar", "2", "marshal"), self)
+	d.mu.Lock()
+	d.running["x"] = "busy"
+	d.mu.Unlock()
+	d.watchSelf()
+	d.maybeRestart()
+	if restarted != "" {
+		t.Fatal("restarted with a run in flight")
+	}
+	d.mu.Lock()
+	delete(d.running, "x")
+	d.mu.Unlock()
+	d.maybeRestart()
+	if restarted != self {
+		t.Errorf("restarted into %q, want the service's own path %q", restarted, self)
+	}
+}

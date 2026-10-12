@@ -72,6 +72,10 @@ type Daemon struct {
 	// Restart, when set, replaces the running daemon with the binary at the
 	// given path. The command that started the daemon supplies it.
 	Restart func(path string)
+	// Self is the path this daemon was started from, the service's
+	// ExecStart. When what it points at changes, a brew upgrade or a deploy
+	// has installed a new MARSHAL, and the daemon restarts into it.
+	Self string
 
 	mu        sync.Mutex
 	running   map[string]string // repo -> run ID
@@ -90,6 +94,8 @@ type Daemon struct {
 	upgrading bool
 	// restartTo is the new MARSHAL binary to restart into once idle.
 	restartTo string
+	// selfSeen fingerprints Self as it was when this daemon started.
+	selfSeen string
 	// scanned is when each repo was last asked for Dependabot PRs.
 	scanned map[string]time.Time
 	// guard wraps Adapter in the quota guard exactly once.
@@ -282,6 +288,7 @@ func (d *Daemon) tick(ctx context.Context) {
 	}
 	d.discoverDependabot(ctx)
 	d.upgradeReleased(ctx)
+	d.watchSelf()
 	d.maybeRestart()
 	d.maybeDigest(ctx)
 	d.maybePrune(ctx)

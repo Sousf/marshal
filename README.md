@@ -272,8 +272,12 @@ marshal stop                            # if a local daemon holds the history
 marshal deploy hermes1 --with-state     # binary, fleet file, app key, database, unit
 ```
 
-It cross-compiles for linux/amd64, so Go is not needed on the host; `gh`
-and `claude` are, logged in as the service user, or pass
+It cross-compiles for linux/amd64. With `--brew` the host installs
+MARSHAL from the tap instead, and an hourly `marshal-upgrade` timer runs
+`brew upgrade` outside the daemon's sandbox; the daemon restarts into the
+new binary once nothing is running. The host needs `go` for the verifier
+to test Go repositories, and `gh` and `claude` logged in as the service
+user, or pass
 `--env ANTHROPIC_API_KEY=...` to give the service its own key. The unit
 reads `~/.config/marshal/env` for secrets and needs `loginctl
 enable-linger` so it runs while you are logged out.
