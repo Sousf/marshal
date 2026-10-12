@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.1.6 (2026-10-12)
+
+- Request the operator's review on every pull request MARSHAL opens
+- marshal deploy --brew: run MARSHAL from the tap, upgraded by a timer
+- Unit: no user bus inside the daemon's sandbox
+- Skills: the operator's write-docs and i-have-adhd, and a way to improve long skills
+- Verifier: harness-run Go tests, upstream module diffs, an event log
+
 ## v0.1.5 (2026-10-12)
 
 - Resolve a relative remote socket against the remote home
