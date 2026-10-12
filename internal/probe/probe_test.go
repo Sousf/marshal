@@ -48,6 +48,41 @@ func TestOnboardAndPosture(t *testing.T) {
 	}
 }
 
+func TestPosturePII(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	write(t, dir, ".github/workflows/ci.yml", "name: ci\non: [pull_request]\npermissions: {contents: read}\njobs: {}\n")
+	write(t, dir, ".github/dependabot.yml", "version: 2\n")
+	write(t, dir, "fleet.yaml", "identity: {email: marshal@marshal.invalid}\nurl: git@github.com:o/r.git\n")
+	write(t, dir, "ci_test.go", "url := \"https://x-access-token:ghs_x@github.com/o/a.git\"\nemail := \"test@example.com\"\nbot := \"marshal@users.noreply.github.com\"\n")
+	write(t, dir, "fixtures/cards.txt", "4242 4242 4242 4242\n4111-1111-1111-1111\n2026-10-12\n")
+	// Real-looking values are split so this file does not trip the probe
+	// when posture-audit runs on marshal itself.
+	write(t, dir, "LICENSE", "Copyright Jane Roe <jane"+"@roe.dev>\n")
+	write(t, dir, ".git/config", "email = jane"+"@roe.dev\n")
+	if r := Run(ctx, "posture-audit", Env{Dir: dir}); r.Needed {
+		t.Fatalf("placeholders and published contacts are not PII: %+v", r)
+	}
+
+	write(t, dir, "testdata/users.json", `{"email": "jane.roe`+"@gmail.com"+`"}`)
+	r := Run(ctx, "posture-audit", Env{Dir: dir})
+	if !r.Needed || !strings.Contains(r.Reason, filepath.Join("testdata", "users.json")+" (email)") {
+		t.Errorf("real address: %+v", r)
+	}
+	for in, want := range map[string]string{
+		"ssn: 123-45" + "-6789":            "SSN",
+		"ssn: 000-12-3456":                 "",
+		"card: 4556 7375" + " 8689 9855":   "card number",
+		"card: 4556 7375 8689 9856":        "",
+		"id: 1234567812345670":             "",
+		"mail jane.roe" + "@company.co.uk": "email",
+	} {
+		if got := piiIn(in); got != want {
+			t.Errorf("piiIn(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestVulnWithContract(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

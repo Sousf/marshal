@@ -119,8 +119,8 @@ Working today:
   `--allow-red` lets a pre-existing failure through, nothing else.
 - Spend control. Before any agent starts, the job's probe checks the
   checkout without a model: the contract's `vuln` verb or govulncheck for
-  vuln-fix, unpinned actions and missing permissions or Dependabot for
-  posture-audit, the baseline files for onboard, new feedback for reflect.
+  vuln-fix, unpinned actions, missing permissions or Dependabot, and
+  likely PII (real email addresses, SSNs, card numbers) for posture-audit, the baseline files for onboard, new feedback for reflect.
   Nothing to do means no run and no cost, recorded as skipped. A scheduled
   job on a repo whose default branch has not moved since it last ran is
   skipped without even cloning. Procedural jobs default to Sonnet at
