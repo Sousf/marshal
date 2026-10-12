@@ -120,13 +120,6 @@ func (l Local) Status(ctx context.Context) (api.Status, error) {
 	if u, why := l.Store.QuotaHold(ctx); u.After(time.Now()) {
 		st.QuotaUntil, st.QuotaWhy = u, why
 	}
-	if open, err := l.Store.ListIncidents(ctx, false); err == nil {
-		for _, i := range open {
-			if i.AckedAt.IsZero() {
-				st.Incidents++
-			}
-		}
-	}
 	return st, nil
 }
 
