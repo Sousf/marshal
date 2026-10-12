@@ -368,9 +368,10 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 		default:
 			// A release PR is the operator's call, and its files are
 			// MARSHAL's own bookkeeping: no agent follows up on it.
-			// Nor on anything that is not a fleet job, such as a skill
-			// proposal: there is no brief to follow up with.
-			if _, known := d.Fleet.Job(r.Job); (!known && r.Job != "skill") || r.Job == run.ReleaseJob {
+			// Skills and tasks are not fleet jobs, but FollowupKind
+			// knows how to follow up on them; anything else unknown
+			// has no job to follow up as.
+			if _, known := d.Fleet.Job(r.Job); (!known && r.Job != "skill" && !run.IsTask(d.Fleet, r.Job)) || r.Job == run.ReleaseJob {
 				continue
 			}
 			// A conflicting PR cannot merge and its checks say nothing
@@ -1464,7 +1465,7 @@ func (d *Daemon) triggerTask(ctx context.Context, name, prompt, repoName, class 
 		return "", err
 	}
 	if name == "" {
-		name = "task"
+		name = run.TaskJob
 	}
 	var repo *config.Repo
 	key := ""

@@ -107,6 +107,24 @@ func (x *Executor) Execute(ctx context.Context, jobName, repoName string, opts O
 	return x.executeJob(ctx, job, repo, opts)
 }
 
+// TaskJob is the job name of a task the operator typed. A task from the
+// fleet's `tasks:` runs under its own name.
+const TaskJob = "task"
+
+// IsTask reports whether runs of job come from a task rather than a fleet
+// job.
+func IsTask(f *config.Fleet, job string) bool {
+	if job == TaskJob {
+		return true
+	}
+	for _, t := range f.Tasks {
+		if t.Name == job {
+			return true
+		}
+	}
+	return false
+}
+
 // Task runs a free-form instruction. With a repo it is a job whose brief is
 // the instruction and whose result is a pull request. Without one it runs
 // in an empty scratch directory with read, search, web and write-to-scratch
@@ -116,7 +134,7 @@ func (x *Executor) Task(ctx context.Context, name, prompt string, repo *config.R
 		return store.Run{}, fmt.Errorf("task: empty prompt")
 	}
 	if name == "" {
-		name = "task"
+		name = TaskJob
 	}
 	if repo != nil {
 		if class == "" {
@@ -370,6 +388,13 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	logs := extra
 	job, ok := x.Fleet.Job(parent.Job)
 	skillPR := false
+	if !ok && IsTask(x.Fleet, parent.Job) {
+		// A task is not a fleet job either, and its instruction is not
+		// kept. A follow-up works from the pull request, so the class is
+		// all it needs from the original.
+		job = config.Job{Name: parent.Job, Class: parent.Class, Description: "a task the operator gave in their own words; the pull request says what it asked for"}
+		ok = true
+	}
 	if !ok {
 		// A skill proposal is not a fleet job, but the reviewer may still
 		// ask for changes to it. The follow-up is confined to the skills
