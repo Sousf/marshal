@@ -33,6 +33,10 @@ PrivateTmp=yes
 ProtectSystem=strict
 ReadWritePaths=%h/.local/share/marshal %h/.config/gh %h/.claude %h/.claude.json %h/.cache %h/go
 ProtectKernelTunables=yes
+# No user bus: through it, anything in this sandbox could ask the user's
+# systemd to run a command outside it (systemd-run --user). The daemon
+# restarts by exec and needs neither socket.
+InaccessiblePaths=-%t/bus -%t/systemd
 ProtectControlGroups=yes
 
 [Install]
