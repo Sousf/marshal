@@ -359,8 +359,13 @@ func (x *Executor) Followup(ctx context.Context, parent store.Run, pr github.PR,
 	return x.FollowupKind(ctx, "fix-checks", parent, pr, logs, opts)
 }
 
+// ResolveConflicts is the follow-up kind that merges the base branch into a
+// proposal GitHub reports as conflicting.
+const ResolveConflicts = "resolve-conflicts"
+
 // FollowupKind is Followup with the brief chosen: "fix-checks" takes the
-// failing logs as context, "address-review" the reviewer's comments.
+// failing logs as context, "address-review" the reviewer's comments, and
+// ResolveConflicts nothing, since the harness starts the merge itself.
 func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.Run, pr github.PR, extra string, opts Options) (store.Run, error) {
 	logs := extra
 	job, ok := x.Fleet.Job(parent.Job)
@@ -435,7 +440,31 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 		defer ws.Remove()
 	}
 
+	// The baseline is the branch as it stands, before the merge, since a
+	// tree with conflict markers in it measures nothing.
 	con, baseline := x.baseline(ctx, ws.Dir, logf)
+	var conflicts []string
+	if kind == ResolveConflicts {
+		conflicts, err = ws.MergeBase(ctx)
+		if err != nil {
+			return finish(store.Failed, err.Error())
+		}
+		logf("note", "merging %s: %d file(s) in conflict", ws.Base(), len(conflicts))
+	}
+	// The agent could abort the merge or leave markers behind; either way
+	// what would be pushed is not a resolution.
+	unresolved := func() string {
+		if kind != ResolveConflicts {
+			return ""
+		}
+		if !ws.Merging(ctx) {
+			return "the merge of " + ws.Base() + " is no longer in progress"
+		}
+		if left := conflictMarkers(ws.Dir, conflicts); len(left) > 0 {
+			return "conflict markers remain in " + strings.Join(left, ", ")
+		}
+		return ""
+	}
 	var b strings.Builder
 	b.WriteString(brief)
 	b.WriteString(jobs.Contract)
@@ -451,6 +480,16 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	switch kind {
 	case "address-review":
 		b.WriteString("\n## The reviewer's comments\n\n" + strings.TrimSpace(logs) + "\n")
+	case ResolveConflicts:
+		fmt.Fprintf(&b, "\n## The conflicts\n\nMARSHAL has started merging `%s` into this branch and stopped before committing.\n", ws.Base())
+		if len(conflicts) == 0 {
+			b.WriteString("\nGit merged every file on its own. Check that the merged tree builds and passes the tests.\n")
+		} else {
+			b.WriteString("\nFiles in conflict:\n\n")
+			for _, c := range conflicts {
+				b.WriteString("- `" + c + "`\n")
+			}
+		}
 	default:
 		if strings.TrimSpace(logs) == "" {
 			b.WriteString("\n## Failing checks\n\nNo failed-step log was available; use `gh run list` and `gh run view --log-failed` to find it.\n")
@@ -490,6 +529,10 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	if _, props := skills.ParseProposals(result.Output, repo.Name+"/"+rec.ID); len(props) > 0 {
 		mem.propose(ctx, x, rec, props, opts.NoPR, logf)
 	}
+	if why := unresolved(); why != "" {
+		logf("note", "%s", why)
+		return finish(store.Failed, why)
+	}
 	changed, err := ws.Changed(ctx)
 	if err != nil {
 		return finish(store.Failed, err.Error())
@@ -503,11 +546,21 @@ func (x *Executor) FollowupKind(ctx context.Context, kind string, parent store.R
 	if blocked != "" {
 		return finish(store.Blocked, blocked)
 	}
+	if why := unresolved(); why != "" {
+		logf("note", "%s", why)
+		return finish(store.Failed, why)
+	}
 	if changed, _ = ws.Changed(ctx); !changed {
 		logf("note", "no changes remain after pre-flight")
 		return finish(store.NoChange, "")
 	}
-	numstat, err := ws.Numstat(ctx)
+	diffstat := ws.Numstat
+	if kind == ResolveConflicts {
+		// Against the branch point, the merge would count every change the
+		// base made since, locked files included, as this run's.
+		diffstat = ws.BaseNumstat
+	}
+	numstat, err := diffstat(ctx)
 	if err != nil {
 		return finish(store.Failed, err.Error())
 	}
@@ -915,7 +968,12 @@ func splitReport(out, job string) (title, body string) {
 	title, body, _ = strings.Cut(out, "\n")
 	title = strings.TrimSpace(strings.TrimLeft(title, "# "))
 	if len(title) > 70 {
-		title = title[:67] + "..."
+		// Cut at a word, so a long title loses its tail, not half a word.
+		cut := title[:67]
+		if i := strings.LastIndex(cut, " "); i > 0 {
+			cut = cut[:i]
+		}
+		title = strings.TrimRight(cut, " ,;:") + "..."
 	}
 	return title, strings.TrimSpace(body)
 }
@@ -945,6 +1003,26 @@ func uniq(in []string) []string {
 func firstLine(s string) string {
 	s, _, _ = strings.Cut(strings.TrimSpace(s), "\n")
 	return s
+}
+
+// conflictMarkers returns the paths, of those git left in conflict, that
+// still hold a conflict marker. "=======" alone is not counted: Markdown
+// and reStructuredText use it as an underline.
+func conflictMarkers(dir string, paths []string) []string {
+	var left []string
+	for _, p := range paths {
+		b, err := os.ReadFile(filepath.Join(dir, p))
+		if err != nil {
+			continue // deleted is a resolution
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if strings.HasPrefix(line, "<<<<<<< ") || strings.HasPrefix(line, ">>>>>>> ") || strings.HasPrefix(line, "||||||| ") {
+				left = append(left, p)
+				break
+			}
+		}
+	}
+	return left
 }
 
 // checkSkillFiles applies the skill content check to every SKILL.md a

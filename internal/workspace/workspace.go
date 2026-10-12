@@ -154,6 +154,47 @@ func PrepareHead(ctx context.Context, root string, repo config.Repo, runID, head
 	return w, nil
 }
 
+// MergeBase starts merging the base branch into the checked-out branch and
+// stops before committing, so the agent can resolve what git could not and
+// Commit then records a merge commit. It returns the paths left in
+// conflict; none means git merged everything itself. A merge that fails
+// for any other reason is aborted and returned as an error.
+func (w *Workspace) MergeBase(ctx context.Context) ([]string, error) {
+	_, mergeErr := w.git(ctx, "merge", "--no-ff", "--no-commit", w.Base())
+	out, err := w.git(ctx, "diff", "--name-only", "--diff-filter=U")
+	if err != nil {
+		return nil, err
+	}
+	var conflicts []string
+	for _, p := range strings.Split(strings.TrimSpace(out), "\n") {
+		if p != "" {
+			conflicts = append(conflicts, p)
+		}
+	}
+	if mergeErr != nil && len(conflicts) == 0 {
+		_, _ = w.git(ctx, "merge", "--abort")
+		return nil, fmt.Errorf("merge %s: %w", w.Base(), mergeErr)
+	}
+	return conflicts, nil
+}
+
+// Merging reports whether a merge is still in progress, so a merge the
+// agent aborted is not mistaken for a resolved one.
+func (w *Workspace) Merging(ctx context.Context) bool {
+	_, err := w.git(ctx, "rev-parse", "--quiet", "--verify", "MERGE_HEAD")
+	return err == nil
+}
+
+// BaseNumstat is Numstat against the tip of the base branch instead of the
+// branch point: after a merge, what the pull request will show, without
+// the base's own changes that the merge brought in.
+func (w *Workspace) BaseNumstat(ctx context.Context) (string, error) {
+	if _, err := w.git(ctx, "add", "--all"); err != nil {
+		return "", err
+	}
+	return w.git(ctx, "diff", "--cached", "--numstat", w.Base())
+}
+
 // Revert creates a commit undoing sha on the current branch. A conflict is
 // returned as an error with git's explanation; nothing is left half done.
 func (w *Workspace) Revert(ctx context.Context, sha, message string) error {

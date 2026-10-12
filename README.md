@@ -192,7 +192,14 @@ The fix is pushed to the PR and answered in a comment that gives every
 point an outcome: done, not done and why, or answered. If no follow-up can
 run, the comment says why.
 
-Each failing head is attempted once, and each PR at most
+A PR that GitHub reports as conflicting gets a follow-up before anything
+else. MARSHAL merges the base into the branch, the agent resolves the
+files git could not, and MARSHAL pushes a merge commit. Policy checks the
+PR's diff against the base, so locked files the base changed do not
+block it. A run that leaves a conflict marker or aborts the merge pushes
+nothing.
+
+Each failing or conflicting head is attempted once, and each PR at most
 `caps.check_fix_attempts` times (default 2, `-1` turns follow-ups off).
 After that the PR is labelled for a human. `marshal fix <run-id>` pushes a
 fix now, outside the cap.

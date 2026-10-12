@@ -40,7 +40,10 @@ type PR struct {
 	Review string
 	// Checks is SUCCESS, FAILURE, PENDING or "" when there are none.
 	Checks string
-	Labels []string
+	// Mergeable is MERGEABLE, CONFLICTING or UNKNOWN, which GitHub reports
+	// while it is still computing the answer after a push.
+	Mergeable string
+	Labels    []string
 	// MergedBy is the login that merged, when merged.
 	MergedBy string
 	// HeadSHA is the commit the PR currently points at; HeadRef its branch.
@@ -61,6 +64,10 @@ func (p PR) Merged() bool { return p.State == "MERGED" }
 // Closed reports whether the PR was closed without merging.
 func (p PR) Closed() bool { return p.State == "CLOSED" }
 
+// Conflicting reports whether the PR cannot merge into its base until
+// someone resolves the conflicts.
+func (p PR) Conflicting() bool { return p.Mergeable == "CONFLICTING" }
+
 // HasLabel reports whether the PR carries a label.
 func (p PR) HasLabel(l string) bool {
 	for _, x := range p.Labels {
@@ -77,6 +84,7 @@ type prJSON struct {
 	MergedAt       time.Time `json:"mergedAt"`
 	ClosedAt       time.Time `json:"closedAt"`
 	ReviewDecision string    `json:"reviewDecision"`
+	Mergeable      string    `json:"mergeable"`
 	MergedBy       struct {
 		Login string `json:"login"`
 	} `json:"mergedBy"`
@@ -101,7 +109,7 @@ type prJSON struct {
 // ViewPR fetches a pull request by URL.
 func (c Client) ViewPR(ctx context.Context, url string) (PR, error) {
 	out, err := c.gh(ctx, "pr", "view", url, "--json",
-		"number,state,mergedAt,closedAt,reviewDecision,mergedBy,labels,statusCheckRollup,headRefOid,headRefName,baseRefName,title,body,mergeCommit")
+		"number,state,mergedAt,closedAt,reviewDecision,mergeable,mergedBy,labels,statusCheckRollup,headRefOid,headRefName,baseRefName,title,body,mergeCommit")
 	if err != nil {
 		return PR{}, err
 	}
@@ -111,7 +119,7 @@ func (c Client) ViewPR(ctx context.Context, url string) (PR, error) {
 	}
 	p := PR{URL: url, Number: j.Number, State: j.State, MergedAt: j.MergedAt, ClosedAt: j.ClosedAt,
 		Review: j.ReviewDecision, MergedBy: j.MergedBy.Login, HeadSHA: j.HeadRefOid, HeadRef: j.HeadRefName,
-		BaseRef: j.BaseRefName, Title: j.Title, Body: j.Body, MergeSHA: j.MergeCommit.Oid}
+		BaseRef: j.BaseRefName, Title: j.Title, Body: j.Body, MergeSHA: j.MergeCommit.Oid, Mergeable: j.Mergeable}
 	for _, l := range j.Labels {
 		p.Labels = append(p.Labels, l.Name)
 	}
