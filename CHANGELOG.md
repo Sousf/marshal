@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.8 (2026-10-12)
+
+- Have posture-audit check repositories for personal data (PII) (#18)
+- Resolve conflicts on open PRs; shorter titles (#20)
+- Rewrite README.md (#19)
+
 ## v0.1.7 (2026-10-12)
 
 - MARSHAL_HOST is all a client machine needs
