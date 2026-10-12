@@ -900,9 +900,10 @@ func (x *Executor) CheckCaps(ctx context.Context, repoName string, operator bool
 }
 
 // uncappedJobs open pull requests that are not the agent's: MARSHAL's
-// deterministic release and brew-setup PRs, and Dependabot's. They do not
-// count toward the PRs-per-repo cap.
-var uncappedJobs = []string{ReleaseJob, BrewSetupJob, "dependabot"}
+// deterministic release and brew-setup PRs, Dependabot's, and the ones
+// people opened that MARSHAL reviews. They do not count toward the
+// PRs-per-repo cap.
+var uncappedJobs = []string{ReleaseJob, BrewSetupJob, "dependabot", "review"}
 
 func (x *Executor) checkCaps(ctx context.Context, repo config.Repo, operator bool) error {
 	caps := x.Fleet.Policy.Caps

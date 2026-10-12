@@ -323,6 +323,44 @@ the class's level allows, behind the same gates as MARSHAL's own PRs. With
 `soak`, the window counts from when Dependabot opened the PR. Closing one
 never moves the ladder.
 
+## Reviewing people's pull requests
+
+```yaml
+review:
+  enabled: true
+  approve_authors: [your-github-login]
+```
+
+With this in the fleet file, MARSHAL checks every repo for open pull
+requests that people opened every 5 minutes. Drafts wait until they are
+ready. Once CI has finished on a head, the verifier reviews it and posts
+its verdict as a comment.
+
+| Verdict and CI                            | Result                              |
+| ----------------------------------------- | ----------------------------------- |
+| PASS, green checks, author in the list    | approved by MARSHAL                 |
+| PASS, anyone else                         | the verdict comment only            |
+| FAIL                                      | changes requested, with the reasons |
+| UNSURE, or a deterministic flag           | labelled for you                    |
+
+Each head gets one review. MARSHAL never pushes to, merges or closes a
+person's PR on its own, and none of this moves the trust ladder. Its
+approval satisfies a one-approval ruleset, which is why only
+`approve_authors` get one, and only while autonomy is on.
+
+Only PRs from people with write access (owner, member or collaborator) are
+reviewed. The verifier runs a PR's tests on the host, and until runs are
+isolated that would let a stranger's code read MARSHAL's credentials; see
+[SECURITY.md](SECURITY.md).
+
+To close a PR on a fleet repo, from the shell or from `marshal chat`:
+
+```sh
+marshal close <run-id|pr-url> "superseded by #12"
+```
+
+The reason is posted on the PR.
+
 ## Running it day to day
 
 - **Incidents.** A failure is filed under a signature: repo, job and the

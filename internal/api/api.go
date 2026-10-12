@@ -23,12 +23,13 @@ import (
 
 // Request is one call to the daemon.
 type Request struct {
-	// Op is one of: status, runs, run, events, trigger, task, fix, autonomy,
+	// Op is one of: status, runs, run, events, trigger, task, fix, close, autonomy,
 	// trust, verdict, log, incidents, ack, quota, fleet. fleet answers in
 	// Text with the daemon's fleet, credentials removed. For ack, ID is a signature
 	// prefix; for quota, Value "clear" lifts the hold; for incidents, Value
 	// "all" includes resolved ones.
 	// For task, Value is the instruction, Repo optional, Job an optional name.
+	// For close, ID is a run id or PR URL and Value the reason.
 	Op    string `json:"op"`
 	Repo  string `json:"repo,omitempty"`
 	Job   string `json:"job,omitempty"`

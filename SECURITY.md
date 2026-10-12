@@ -111,6 +111,11 @@ Until per-run isolation lands:
   anything the fleet should never touch.
 - Treat a skill or memory pull request like a change to every repository at
   once. That is what it is.
+- `review:` runs the tests of pull requests people open, on this host.
+  MARSHAL only does so for people with write access to the repository,
+  since a stranger's code would meet gap 1. Anyone in `approve_authors`
+  can get a pull request approved by a model's PASS, which satisfies a
+  one-approval ruleset: list only people you would trust to merge alone.
 
 ## The plan for real isolation
 

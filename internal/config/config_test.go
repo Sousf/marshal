@@ -257,3 +257,19 @@ notify:
 		t.Error("Shareable must not modify the daemon's own fleet")
 	}
 }
+
+func TestReviewApproveAuthors(t *testing.T) {
+	f, err := Parse([]byte(good + "review: {enabled: true, approve_authors: [Sousf]}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.Review.Enabled || !f.Review.MayApprove("sousf") {
+		t.Errorf("review = %+v; logins match case-insensitively", f.Review)
+	}
+	if f.Review.MayApprove("alice") || f.Review.MayApprove("") {
+		t.Error("only listed logins may be approved")
+	}
+	if g, _ := Parse([]byte(good)); g.Review.Enabled {
+		t.Error("review is off unless the fleet turns it on")
+	}
+}

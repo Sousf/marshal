@@ -103,6 +103,7 @@ Commands:
 - marshal trigger <job> <repo>        start a job in the background
 - marshal task "<instruction>" [--repo <name>]   free-form work; with a repo it ends in a PR, without it in a report
 - marshal fix <run-id>                 push a fix to a proposal's PR now
+- marshal close <run-id|pr-url> "<reason>"   close a PR on a fleet repo; the reason is posted on it
 - marshal verify <run-id>              run the verifier on a proposal
 - marshal autonomy on|off              the kill switch
 - marshal app status · marshal notify test · marshal logs

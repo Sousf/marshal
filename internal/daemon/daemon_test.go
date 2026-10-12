@@ -41,6 +41,9 @@ type fakeGH struct {
 	depCalls int
 	approved []string
 	closed   []string
+	// people is what PeoplePRs returns; changes the RequestChanges calls.
+	people  []github.PR
+	changes []string
 	// files is what FileText returns, by path.
 	files     map[string]string
 	fileCalls int
@@ -61,6 +64,19 @@ func (g *fakeGH) DependabotPRs(context.Context, string) ([]github.PR, error) {
 	defer g.mu.Unlock()
 	g.depCalls++
 	return g.deps, nil
+}
+
+func (g *fakeGH) PeoplePRs(context.Context, string) ([]github.PR, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.people, nil
+}
+
+func (g *fakeGH) RequestChanges(_ context.Context, url, _ string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.changes = append(g.changes, url)
+	return nil
 }
 
 func (g *fakeGH) ApprovePR(_ context.Context, url, _ string) error {
@@ -153,9 +169,11 @@ func (g *fakeGH) FailedLogs(context.Context, string, string, int) (string, error
 }
 
 type fakeAdapter struct {
-	mu      sync.Mutex
-	calls   int
-	verdict string // what the verifier run answers; empty means no structured answer
+	mu    sync.Mutex
+	calls int
+	// verifies are the prompts of verifier runs, which calls leaves out.
+	verifies []string
+	verdict  string // what the verifier run answers; empty means no structured answer
 	// fix, when set, is applied to the work tree of a fix-checks run so
 	// there is something to push.
 	fix     func(dir string)
@@ -170,6 +188,7 @@ func (f *fakeAdapter) Run(_ context.Context, req runner.Request, emit func(runne
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if req.JSONSchema != "" {
+		f.verifies = append(f.verifies, req.Prompt)
 		r := runner.Result{Turns: 2, CostUSD: 0.05}
 		if f.verdict != "" {
 			r.Structured = []byte(`{"verdict":"` + f.verdict + `","summary":"scripted","findings":[],"tests_ran":true,"tests_passed":true}`)
@@ -1295,10 +1314,12 @@ func TestOperatorRequestsSkipThePRCapAndRefusalsAreImmediate(t *testing.T) {
 	ctx := context.Background()
 	d, _ := newDaemon(t, &fakeGH{prs: map[string]github.PR{}})
 	d.Fleet.Policy.Caps.PRsPerRepoPerDay = 1
-	// A deterministic release PR does not use up the cap.
+	// A deterministic release PR does not use up the cap, nor does a
+	// person's PR that MARSHAL is reviewing.
 	d.Store.CreateRun(ctx, &store.Run{Job: "release", Repo: "x", Status: store.Proposed, StartedAt: time.Now()})
+	d.Store.CreateRun(ctx, &store.Run{Job: ReviewJob, Repo: "x", Status: store.Proposed, StartedAt: time.Now()})
 	if _, err := d.Trigger(ctx, "audit", "x"); err != nil {
-		t.Fatalf("release PR counted toward the cap: %v", err)
+		t.Fatalf("release or reviewed PR counted toward the cap: %v", err)
 	}
 	wait(t, d)
 	d.Store.CreateRun(ctx, &store.Run{Job: "audit", Repo: "x", Status: store.Proposed, StartedAt: time.Now()})
