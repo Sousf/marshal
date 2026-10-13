@@ -56,6 +56,11 @@ type PR struct {
 	MergeSHA string
 	// CreatedAt is when the PR was opened.
 	CreatedAt time.Time
+	// Author is the login that opened the PR. Association is GitHub's
+	// author_association: OWNER, MEMBER, COLLABORATOR, CONTRIBUTOR, NONE...
+	Author      string
+	Association string
+	Draft       bool
 }
 
 // Merged reports whether the PR was merged.
@@ -104,12 +109,16 @@ type prJSON struct {
 	MergeCommit struct {
 		Oid string `json:"oid"`
 	} `json:"mergeCommit"`
+	Author struct {
+		Login string `json:"login"`
+	} `json:"author"`
+	IsDraft bool `json:"isDraft"`
 }
 
 // ViewPR fetches a pull request by URL.
 func (c Client) ViewPR(ctx context.Context, url string) (PR, error) {
 	out, err := c.gh(ctx, "pr", "view", url, "--json",
-		"number,state,mergedAt,closedAt,reviewDecision,mergeable,mergedBy,labels,statusCheckRollup,headRefOid,headRefName,baseRefName,title,body,mergeCommit")
+		"number,state,mergedAt,closedAt,reviewDecision,mergeable,mergedBy,labels,statusCheckRollup,headRefOid,headRefName,baseRefName,title,body,mergeCommit,author,isDraft")
 	if err != nil {
 		return PR{}, err
 	}
@@ -119,7 +128,8 @@ func (c Client) ViewPR(ctx context.Context, url string) (PR, error) {
 	}
 	p := PR{URL: url, Number: j.Number, State: j.State, MergedAt: j.MergedAt, ClosedAt: j.ClosedAt,
 		Review: j.ReviewDecision, MergedBy: j.MergedBy.Login, HeadSHA: j.HeadRefOid, HeadRef: j.HeadRefName,
-		BaseRef: j.BaseRefName, Title: j.Title, Body: j.Body, MergeSHA: j.MergeCommit.Oid, Mergeable: j.Mergeable}
+		BaseRef: j.BaseRefName, Title: j.Title, Body: j.Body, MergeSHA: j.MergeCommit.Oid, Mergeable: j.Mergeable,
+		Author: j.Author.Login, Draft: j.IsDraft}
 	for _, l := range j.Labels {
 		p.Labels = append(p.Labels, l.Name)
 	}
@@ -504,6 +514,50 @@ func (c Client) DependabotPRs(ctx context.Context, slug string) ([]PR, error) {
 		prs = append(prs, PR{URL: x.URL, Number: x.Number, State: "OPEN", Title: x.Title, HeadRef: x.HeadRef, HeadSHA: x.HeadSHA, CreatedAt: x.CreatedAt})
 	}
 	return prs, nil
+}
+
+// PeoplePRs lists the open pull requests on a repository that a person
+// opened, leaving out every bot's, with GitHub's author_association, which
+// gh pr list does not report.
+func (c Client) PeoplePRs(ctx context.Context, slug string) ([]PR, error) {
+	out, err := c.gh(ctx, "api", "repos/"+slug+"/pulls?state=open&per_page=50")
+	if err != nil {
+		return nil, err
+	}
+	var list []struct {
+		Number  int       `json:"number"`
+		URL     string    `json:"html_url"`
+		Title   string    `json:"title"`
+		Draft   bool      `json:"draft"`
+		Created time.Time `json:"created_at"`
+		Assoc   string    `json:"author_association"`
+		User    struct {
+			Login string `json:"login"`
+			Type  string `json:"type"`
+		} `json:"user"`
+		Head struct {
+			Ref string `json:"ref"`
+			SHA string `json:"sha"`
+		} `json:"head"`
+	}
+	if err := json.Unmarshal(out, &list); err != nil {
+		return nil, err
+	}
+	var prs []PR
+	for _, x := range list {
+		if x.User.Type != "User" {
+			continue
+		}
+		prs = append(prs, PR{URL: x.URL, Number: x.Number, State: "OPEN", Title: x.Title, HeadRef: x.Head.Ref, HeadSHA: x.Head.SHA,
+			CreatedAt: x.Created, Author: x.User.Login, Association: x.Assoc, Draft: x.Draft})
+	}
+	return prs, nil
+}
+
+// RequestChanges submits a review that requests changes.
+func (c Client) RequestChanges(ctx context.Context, url, body string) error {
+	_, err := c.gh(ctx, "pr", "review", url, "--request-changes", "--body", body)
+	return err
 }
 
 // ApprovePR submits an approving review.

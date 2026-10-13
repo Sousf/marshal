@@ -33,6 +33,8 @@ import (
 // script it.
 type GitHub interface {
 	DependabotPRs(ctx context.Context, slug string) ([]github.PR, error)
+	PeoplePRs(ctx context.Context, slug string) ([]github.PR, error)
+	RequestChanges(ctx context.Context, url, body string) error
 	ApprovePR(ctx context.Context, url, body string) error
 	ClosePR(ctx context.Context, url, comment string) error
 	FileText(ctx context.Context, slug, path string) (string, error)
@@ -99,6 +101,10 @@ type Daemon struct {
 	selfSeen string
 	// scanned is when each repo was last asked for Dependabot PRs.
 	scanned map[string]time.Time
+	// reviewScanned is when each repo was last asked for people's PRs;
+	// reviewSkipped the PRs already logged as not run on this host.
+	reviewScanned map[string]time.Time
+	reviewSkipped map[string]bool
 	// guard wraps Adapter in the quota guard exactly once.
 	guard sync.Once
 }
@@ -288,6 +294,7 @@ func (d *Daemon) tick(ctx context.Context) {
 		d.fail("watch: %v", err)
 	}
 	d.discoverDependabot(ctx)
+	d.discoverReviews(ctx)
 	d.upgradeReleased(ctx)
 	d.watchSelf()
 	d.maybeRestart()
@@ -341,6 +348,14 @@ func (d *Daemon) syncProposals(ctx context.Context) error {
 			continue
 		}
 		repo, _ := d.Fleet.Repo(r.Repo)
+		if r.Job == ReviewJob {
+			// Not MARSHAL's work: none of what follows applies to it.
+			d.syncReview(ctx, &r, pr, autonomy)
+			if err := d.Store.UpdateRun(ctx, &r); err != nil {
+				return err
+			}
+			continue
+		}
 		switch {
 		case pr.Merged():
 			r.Status = store.Merged
@@ -1127,12 +1142,13 @@ func (d *Daemon) startVerify(ctx context.Context, r store.Run, pr github.PR) {
 		if res.Head == "" {
 			res.Head = pr.HeadSHA
 		}
-		if r.Job == DependabotJob && res.Verdict.Verdict == verifier.Fail && res.Checks.Fatal() {
-			// A FAIL closes a Dependabot PR. A deterministic red flag, such
-			// as a new module or a changed action, is not a judgment that
-			// the update is bad: a human decides those.
+		if (r.Job == DependabotJob || r.Job == ReviewJob) && res.Verdict.Verdict == verifier.Fail && res.Checks.Fatal() {
+			// A FAIL closes a Dependabot PR and requests changes on a
+			// person's. A deterministic red flag, such as a new module or a
+			// changed action, is not a judgment that the change is bad: a
+			// human decides those.
 			res.Verdict.Verdict = verifier.Unsure
-			res.Summary = "A deterministic check flagged this update, so a human decides. " + res.Summary
+			res.Summary = "A deterministic check flagged this change, so a human decides. " + res.Summary
 		}
 		if err := d.Store.PutVerdict(bg, res.Verdict); err != nil {
 			d.fail("run %s: verdict: %v", r.ID, err)
@@ -1661,6 +1677,12 @@ func (d *Daemon) Handle(ctx context.Context, req api.Request) api.Response {
 			return api.Fail("%v", err)
 		}
 		return api.Response{ID: id}
+	case "close":
+		url, err := d.Close(ctx, req.ID, req.Value)
+		if err != nil {
+			return api.Fail("%v", err)
+		}
+		return api.Response{ID: url}
 	case "fix":
 		id, err := d.Fix(ctx, req.ID)
 		if err != nil {

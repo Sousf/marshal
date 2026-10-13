@@ -68,6 +68,8 @@ const usage = `marshal — Maintains, Audits, Repairs, Secures, Hardens, And Lea
       --allow-red                   open the PR even if its own checks fail, as long as nothing regressed
   marshal trigger <job> <repo>    ask the daemon to run a job in the background (--force skips the probe)
   marshal fix <run-id>            ask the daemon to push a fix to that proposal's PR now, outside the cap
+  marshal close <run-id|pr-url> "<reason>"
+                                  close a PR on a fleet repo; the reason is posted on it
   marshal task "<instruction>"    run a free-form task via the daemon; --repo <name> ends in a PR, without it a report
   marshal verify <run-id>         run the verifier on a proposal here, in the foreground
       --comment                     also post the verdict on the PR
@@ -180,6 +182,16 @@ func app(args []string) error {
 			return err
 		}
 		fmt.Printf("fix run %s started; `marshal show %s` to follow\n", resp.ID, resp.ID)
+		return nil
+	case "close":
+		if len(rest) < 2 {
+			return errors.New(`usage: marshal close <run-id|pr-url> "<reason>"`)
+		}
+		resp, err := client().Do(ctx, api.Request{Op: "close", ID: rest[0], Value: strings.Join(rest[1:], " ")})
+		if err != nil {
+			return err
+		}
+		fmt.Println("closed", resp.ID)
 		return nil
 	case "autonomy":
 		return cmdAutonomy(ctx, rest)

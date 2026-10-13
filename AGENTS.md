@@ -69,6 +69,12 @@ Rules the code enforces, which no change may weaken:
   downgraded to UNSURE first, so a red flag on a green update goes to a
   human rather than closing it. MARSHAL
   approves only a PASS head with green checks.
+- Pull requests people open (`daemon/review.go`) are reviewed, never
+  pushed to, merged or closed by MARSHAL on its own, and never move the
+  ladder. Only authors with write access are run on the host until runs
+  are isolated. Approval needs a PASS on the head, green checks, autonomy
+  on, and an author in `review.approve_authors`. Closing takes the
+  operator's `marshal close` with a reason.
 - Contract verbs run without the host's git config or identity
   (`contract.scrub`), as on a CI runner; tests here do the same through
   each package's `TestMain`. A derived `ci` verb runs its workflow steps

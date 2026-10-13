@@ -70,6 +70,9 @@ type Fleet struct {
 	// Homebrew, when set, makes onboarding check that each Go repo
 	// releases to this tap, and propose the wiring when it does not.
 	Homebrew Homebrew `yaml:"homebrew"`
+	// Review, when enabled, makes MARSHAL review pull requests people open
+	// on the fleet's repos.
+	Review PRReview `yaml:"review"`
 
 	// dir is where the file was read from; relative prompt paths resolve
 	// against it.
@@ -140,6 +143,28 @@ func (f *Fleet) MemoryRepo() (Repo, string, bool) {
 		dir = "skills"
 	}
 	return r, dir, true
+}
+
+// PRReview configures reviewing pull requests that people open. MARSHAL
+// verifies each new head and posts the verdict; it never pushes to, merges
+// or closes such a PR on its own.
+type PRReview struct {
+	Enabled bool `yaml:"enabled"`
+	// ApproveAuthors are the GitHub logins whose pull requests MARSHAL may
+	// approve, on a verifier PASS with green checks. An approval satisfies
+	// a one-approval ruleset, so anyone not listed gets the review and
+	// never the approval.
+	ApproveAuthors []string `yaml:"approve_authors"`
+}
+
+// MayApprove reports whether login is one of ApproveAuthors.
+func (r PRReview) MayApprove(login string) bool {
+	for _, a := range r.ApproveAuthors {
+		if login != "" && strings.EqualFold(a, login) {
+			return true
+		}
+	}
+	return false
 }
 
 // Homebrew names the tap every tool in the fleet publishes to.
