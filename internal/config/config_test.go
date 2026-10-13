@@ -202,6 +202,24 @@ never:
 	}
 }
 
+func TestIsolation(t *testing.T) {
+	f, err := Parse([]byte(good + "isolation:\n  mode: bwrap\n  read_only: [\"~/sdk\"]\n  writable: [/var/cache/x]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.Isolation.On() {
+		t.Error("mode bwrap should be on")
+	}
+	for _, bad := range []string{"isolation:\n  mode: docker\n", "isolation:\n  mode: bwrap\n  writable: [cache]\n"} {
+		if _, err := Parse([]byte(good + bad)); err == nil {
+			t.Errorf("should not load: %s", bad)
+		}
+	}
+	if g, _ := Parse([]byte(good)); g.Isolation.On() {
+		t.Error("isolation should be off unless configured")
+	}
+}
+
 func TestReviewers(t *testing.T) {
 	src := strings.Replace(good, "  model: m\n", "  model: m\n  reviewers: [Sousf]\n", 1)
 	src = strings.Replace(src, "repos:\n", "repos:\n  - {name: b, url: u2, jobs: [j1], reviewers: [someone-else, Sousf/maintainers]}\n", 1)

@@ -1,9 +1,35 @@
 package runner
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestBinaryDirsFollowsTheSymlink(t *testing.T) {
+	root := t.TempDir()
+	real := filepath.Join(root, "share", "claude", "versions", "2.0")
+	bin := filepath.Join(root, "bin")
+	for _, d := range []string{filepath.Dir(real), bin} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(real, nil, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(bin, "claude")); err != nil {
+		t.Fatal(err)
+	}
+	got := binaryDirs(filepath.Join(bin, "claude"))
+	if len(got) != 2 || got[0] != bin || got[1] != filepath.Dir(real) {
+		t.Errorf("binaryDirs = %v", got)
+	}
+	if binaryDirs("claude") != nil {
+		t.Error("a binary not found on PATH has nothing to bind")
+	}
+}
 
 // recorded is a trimmed capture of a real headless run.
 const recorded = `{"type":"system","subtype":"init","session_id":"abc","model":"claude-haiku-5-5"}

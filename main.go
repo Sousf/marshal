@@ -35,6 +35,7 @@ import (
 	"github.com/Sousf/marshal/internal/remote"
 	"github.com/Sousf/marshal/internal/run"
 	"github.com/Sousf/marshal/internal/runner"
+	"github.com/Sousf/marshal/internal/sandbox"
 	"github.com/Sousf/marshal/internal/store"
 	"github.com/Sousf/marshal/internal/ui"
 	"github.com/Sousf/marshal/internal/verifier"
@@ -207,6 +208,9 @@ func app(args []string) error {
 		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("no fleet file at %s; run `marshal init`", config.Path())
 		}
+		if err == nil {
+			err = isolate(fleet)
+		}
 	}
 	if err != nil {
 		return err
@@ -227,6 +231,11 @@ func app(args []string) error {
 				return fmt.Errorf("github_app: could not mint a token: %w", err)
 			}
 			fmt.Println("identity: token minted ok")
+		}
+		if s := sandbox.Current(); s == nil {
+			fmt.Println("isolation: none; runs can read every file this user can (see SECURITY.md)")
+		} else {
+			fmt.Println("isolation: " + s.String())
 		}
 		return nil
 	case "repos":

@@ -16,6 +16,7 @@ import (
 	"github.com/Sousf/marshal/internal/contract"
 	"github.com/Sousf/marshal/internal/github"
 	"github.com/Sousf/marshal/internal/runner"
+	"github.com/Sousf/marshal/internal/sandbox"
 	"github.com/Sousf/marshal/internal/store"
 	"github.com/Sousf/marshal/internal/tapkey"
 )
@@ -30,6 +31,52 @@ func agent(f *config.Fleet, st *store.Store) runner.Adapter {
 		HeldUntil: func(ctx context.Context) time.Time { u, _ := st.QuotaHold(ctx); return u },
 		Hold:      func(ctx context.Context, u time.Time, why string) { _ = st.SetQuotaHold(ctx, u, why) },
 	}
+}
+
+// isolate sets the process-wide sandbox from the fleet file. With bwrap
+// configured and not working it is an error, so a host that cannot isolate
+// never quietly runs agents without it.
+func isolate(f *config.Fleet) error {
+	if !f.Isolation.On() {
+		sandbox.Use(nil)
+		return nil
+	}
+	var hide []string
+	if home, err := os.UserHomeDir(); err == nil {
+		hide = append(hide, home)
+	}
+	if d, err := os.UserConfigDir(); err == nil {
+		hide = append(hide, filepath.Join(d, "marshal"))
+	}
+	hide = append(hide, config.StateDir())
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
+		hide = append(hide, d)
+	}
+	// Either may sit outside every hidden directory.
+	mask := []string{config.Path()}
+	if k := f.GitHubApp.PrivateKeyFile; k != "" {
+		mask = append(mask, config.ExpandHome(k))
+	}
+	for i := range mask {
+		if abs, err := filepath.Abs(mask[i]); err == nil {
+			mask[i] = abs
+		}
+	}
+	expand := func(ps []string) (out []string) {
+		for _, p := range ps {
+			out = append(out, config.ExpandHome(p))
+		}
+		return out
+	}
+	s, err := sandbox.New(sandbox.HostOptions(hide, mask, expand(f.Isolation.ReadOnly), expand(f.Isolation.Writable)))
+	if err == nil {
+		err = s.Probe()
+	}
+	if err != nil {
+		return err
+	}
+	sandbox.Use(s)
+	return nil
 }
 
 // viaDaemon sends req, and when the daemon is down hands the store to
