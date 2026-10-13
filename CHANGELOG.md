@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.1.9 (2026-10-13)
+
+- Review pull requests people open on fleet repos (#25)
+- Follow up on pull requests opened by tasks (#24)
+- Sandbox agent runs and contract verbs with bubblewrap (#23)
+- Remove incident count from the TUI status line (#22)
+
 ## v0.1.8 (2026-10-12)
 
 - Have posture-audit check repositories for personal data (PII) (#18)
