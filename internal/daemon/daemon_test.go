@@ -281,12 +281,18 @@ func proposal(t *testing.T, d *Daemon, class, url string, started time.Time) sto
 
 func proposalIn(t *testing.T, d *Daemon, gh *fakeGH, dir, class, url string, started time.Time) store.Run {
 	t.Helper()
-	r := &store.Run{Job: "audit", Repo: "x", Class: class, Status: store.Proposed, StartedAt: started}
+	return proposalOf(t, d, gh, dir, "audit", class, url, started)
+}
+
+// proposalOf is proposalIn for a run of any job name.
+func proposalOf(t *testing.T, d *Daemon, gh *fakeGH, dir, job, class, url string, started time.Time) store.Run {
+	t.Helper()
+	r := &store.Run{Job: job, Repo: "x", Class: class, Status: store.Proposed, StartedAt: started}
 	if err := d.Store.CreateRun(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
 	r.PRURL = url
-	r.Branch = "marshal/audit/" + r.ID
+	r.Branch = "marshal/" + job + "/" + r.ID
 	if dir != "" {
 		sha := branch(t, dir, r.Branch)
 		gh.mu.Lock()
@@ -750,6 +756,44 @@ func TestFixAttemptsCanBeDisabled(t *testing.T) {
 	wait(t, d)
 	if fu, _ := d.Store.Followups(context.Background(), r.ID); len(fu) != 0 {
 		t.Error("-1 disables follow-ups")
+	}
+}
+
+func TestTaskPRsGetFollowups(t *testing.T) {
+	ctx := context.Background()
+	gh := &fakeGH{prs: map[string]github.PR{
+		"typed":     {State: "OPEN", Checks: "SUCCESS", Title: "T", Body: "B"},
+		"scheduled": {State: "OPEN", Checks: "SUCCESS", Title: "T", Body: "B"},
+		"unknown":   {State: "OPEN", Checks: "SUCCESS", Title: "T", Body: "B"},
+	}}
+	d, a, dir := newDaemonDir(t, gh)
+	d.Fleet.Tasks = append(d.Fleet.Tasks, config.Task{Name: "weekly-tidy", Prompt: "tidy", Repo: "x"})
+	a.fix = func(wd string) { os.WriteFile(filepath.Join(wd, "addressed.txt"), []byte("ok\n"), 0o644) }
+	runs := map[string]store.Run{}
+	for url, job := range map[string]string{"typed": "task", "scheduled": "weekly-tidy", "unknown": "gone"} {
+		runs[url] = proposalOf(t, d, gh, dir, job, "hardening", url, time.Now().Add(-time.Hour))
+	}
+	gh.humanComments = map[string][]github.Comment{}
+	for url := range runs {
+		gh.humanComments[url] = []github.Comment{{Author: "pete", At: time.Now().Add(-time.Minute), Body: "also hide " + url, Where: "comment"}}
+	}
+
+	// One run per repo at a time: settle until both task PRs have had theirs.
+	for i := 0; i < 4; i++ {
+		settle(t, d)
+		wait(t, d)
+	}
+	for _, url := range []string{"typed", "scheduled"} {
+		fu, _ := d.Store.Followups(ctx, runs[url].ID)
+		if len(fu) != 1 || fu[0].Job != "address-review" || fu[0].Status != store.Pushed {
+			t.Errorf("%s: followups = %+v", url, fu)
+		}
+		if !strings.Contains(strings.Join(a.prompts, "\n"), "also hide "+url) {
+			t.Errorf("%s: the comment should be in the brief", url)
+		}
+	}
+	if fu, _ := d.Store.Followups(ctx, runs["unknown"].ID); len(fu) != 0 {
+		t.Errorf("follow-up started for a job that is neither in the fleet nor a task: %+v", fu)
 	}
 }
 
