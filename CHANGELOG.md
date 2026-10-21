@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.10 (2026-10-18)
+
+- Pin CI actions to commit SHAs (#27)
+
 ## v0.1.9 (2026-10-13)
 
 - Review pull requests people open on fleet repos (#25)
