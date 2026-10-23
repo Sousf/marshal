@@ -99,3 +99,4 @@ Facts recorded by MARSHAL from its own runs, reviewed in the pull requests that 
 - `runner.Claude` passes `--strict-mcp-config` and sets `ENABLE_CLAUDEAI_MCP_SERVERS=false`, so agent runs load no MCP servers. `--setting-sources project` on its own lets the account's claude.ai connectors and a repo's `.mcp.json` through.
 - The daemon deletes the `events` rows of runs that finished more than 30 days ago, once a day (`daemon.maybePrune`, `store.PruneEvents`). Run rows and verdicts are kept.
 - bubblewrap is not installed on the host MARSHAL's own runs use, so `internal/sandbox`'s `TestLive` skips there. The real sandbox can only be checked on a host with `bwrap`.
+- CI installs Go with `go-version-file: go.mod` in both `ci.yml` and `release.yml`, so the `toolchain` line in `go.mod` decides which stdlib CI is scanned against.
