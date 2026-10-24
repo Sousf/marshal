@@ -1,5 +1,9 @@
 # Changelog
 
+## v0.1.11 (2026-10-24)
+
+- Pin Go toolchain to 1.27.3 (#30)
+
 ## v0.1.10 (2026-10-18)
 
 - Pin CI actions to commit SHAs (#27)
